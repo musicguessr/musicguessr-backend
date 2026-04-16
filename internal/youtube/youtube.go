@@ -1,6 +1,7 @@
 package youtube
 
 import (
+	"context"
 	_ "embed"
 	"encoding/json"
 	"fmt"
@@ -53,7 +54,7 @@ type invidiousItem struct {
 // SearchVideoID finds the best YouTube video ID for a track.
 // If allowVariants is true and no original is found, a second pass is attempted
 // that accepts remixes, acoustic versions, and other alt versions as a fallback.
-func SearchVideoID(artist, title string, allowVariants bool) (string, error) {
+func SearchVideoID(ctx context.Context, artist, title string, allowVariants bool) (string, error) {
 	// Use ASCII-normalized coreTitle for the query:
 	// - removes diacritics so Polish/French/German chars don't confuse Invidious instances
 	// - strips parenthetical version info ("(Radio edit)", "(feat. X)") for better recall
@@ -61,7 +62,7 @@ func SearchVideoID(artist, title string, allowVariants bool) (string, error) {
 	q := url.QueryEscape(normalizeForQuery(artist) + " " + normalizeForQuery(coreTitle(title)))
 	slog.Info("youtube search start", "artist", artist, "title", title, "allowVariants", allowVariants)
 	for _, inst := range instances() {
-		id, score, variant, err := tryInstance(inst, q, artist, title, allowVariants)
+		id, score, variant, err := tryInstance(ctx, inst, q, artist, title, allowVariants)
 		if err != nil {
 			slog.Warn("invidious instance failed", "instance", inst, "err", err)
 			continue
@@ -76,15 +77,21 @@ func SearchVideoID(artist, title string, allowVariants bool) (string, error) {
 	return "", fmt.Errorf("no confident match found for %q – %q", artist, title)
 }
 
-func tryInstance(instance, query, artist, title string, allowVariants bool) (string, int, bool, error) {
+func tryInstance(ctx context.Context, instance, query, artist, title string, allowVariants bool) (string, int, bool, error) {
 	reqURL := instance + "/api/v1/search?q=" + query + "&type=video&fields=videoId,title,type"
 	slog.Debug("invidious request", "url", reqURL)
-	resp, err := client.Get(reqURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return "", 0, false, err
+	}
+	req.Header.Set("User-Agent", "musicguessr/1.0 (+https://github.com/musicguessr)")
+	req.Header.Set("Accept", "application/json")
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", 0, false, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		return "", 0, false, fmt.Errorf("status %d", resp.StatusCode)
 	}
 	var items []invidiousItem
@@ -171,10 +178,11 @@ func filterComments(ss []string) []string {
 // word-coverage scoring only requires the core song name, not variant metadata.
 //
 // Examples:
-//   "Maczo (Dub)"              → "Maczo"
-//   "Wake Me Up (feat. ...)"   → "Wake Me Up"
-//   "Loca Bambina - Radio edit"→ "Loca Bambina"
-//   "99 Luftballons"           → "99 Luftballons"   (unchanged)
+//
+//	"Maczo (Dub)"              → "Maczo"
+//	"Wake Me Up (feat. ...)"   → "Wake Me Up"
+//	"Loca Bambina - Radio edit"→ "Loca Bambina"
+//	"99 Luftballons"           → "99 Luftballons"   (unchanged)
 func coreTitle(s string) string {
 	// Strip "(X)" / "[X]" suffix first — most common in Spotify titles
 	if idx := strings.Index(s, " ("); idx > 0 {

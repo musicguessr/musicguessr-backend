@@ -1,6 +1,7 @@
 package itunes
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -32,11 +33,23 @@ type result struct {
 
 var client = &http.Client{Timeout: 5 * time.Second}
 
-func Search(artist, title string) (*Track, error) {
-	q := url.QueryEscape(artist + " " + title)
-	resp, err := client.Get(fmt.Sprintf("%s?term=%s&media=music&limit=3", searchURL, q))
+func Search(ctx context.Context, artist, title string) (*Track, error) {
+	vals := url.Values{}
+	vals.Set("term", artist+" "+title)
+	vals.Set("media", "music")
+	vals.Set("limit", "3")
+	reqURL := searchURL + "?" + vals.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return nil, fmt.Errorf("itunes search returned status %d", resp.StatusCode)
 	}
 	defer resp.Body.Close()
 
@@ -50,8 +63,12 @@ func Search(artist, title string) (*Track, error) {
 
 	item := r.Results[0]
 	year := 0
-	if len(item.ReleaseDate) >= 4 {
-		fmt.Sscanf(item.ReleaseDate[:4], "%d", &year)
+	if item.ReleaseDate != "" {
+		if t, err := time.Parse(time.RFC3339, item.ReleaseDate); err == nil {
+			year = t.Year()
+		} else if len(item.ReleaseDate) >= 4 {
+			fmt.Sscanf(item.ReleaseDate[:4], "%d", &year)
+		}
 	}
 
 	artwork := strings.Replace(item.ArtworkURL100, "100x100", "300x300", 1)

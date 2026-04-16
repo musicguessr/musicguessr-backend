@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -51,6 +52,7 @@ type Resolver struct {
 
 func New() *Resolver {
 	r := &Resolver{}
+	r.lookup = make(map[string]string)
 	if err := r.load(); err != nil {
 		slog.Error("initial db load failed", "err", err)
 	}
@@ -64,7 +66,14 @@ func (r *Resolver) Resolve(rawURL string) (string, error) {
 		return "", fmt.Errorf("not a valid Hitster URL")
 	}
 	deckID := strings.ToLower(m[1])
-	cardID := fmt.Sprintf("%05s", m[2])
+	cardID := m[2]
+	if n, err := strconv.Atoi(m[2]); err == nil {
+		cardID = fmt.Sprintf("%05d", n)
+	} else {
+		if len(cardID) < 5 {
+			cardID = strings.Repeat("0", 5-len(cardID)) + cardID
+		}
+	}
 	key := deckID + ":" + cardID
 
 	r.mu.RLock()
@@ -83,6 +92,9 @@ func (r *Resolver) load() error {
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("gameset DB returned status %d", resp.StatusCode)
+	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
@@ -107,7 +119,9 @@ func (r *Resolver) load() error {
 }
 
 func (r *Resolver) refreshLoop() {
-	for range time.Tick(refreshEvery) {
+	ticker := time.NewTicker(refreshEvery)
+	defer ticker.Stop()
+	for range ticker.C {
 		ts, err := fetchTimestamp()
 		if err != nil {
 			slog.Warn("timestamp check failed", "err", err)
@@ -131,6 +145,9 @@ func fetchTimestamp() (int64, error) {
 		return 0, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("timestamp endpoint returned %d", resp.StatusCode)
+	}
 	var v struct {
 		Timestamp int64 `json:"timestamp"`
 	}

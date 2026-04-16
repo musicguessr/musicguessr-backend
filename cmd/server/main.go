@@ -1,14 +1,18 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
-	"github.com/musicguessr/musicguessr-backend/internal/itunes"
+	"github.com/musicguessr/musicguessr-backend/internal/metadata"
 	"github.com/musicguessr/musicguessr-backend/internal/resolver"
 	"github.com/musicguessr/musicguessr-backend/internal/youtube"
 )
@@ -20,7 +24,6 @@ type resolveResponse struct {
 	Title          string            `json:"title,omitempty"`
 	Year           int               `json:"year,omitempty"`
 	ArtworkURL     string            `json:"artwork_url,omitempty"`
-	AppleMusicURL  string            `json:"apple_music_url,omitempty"`
 	YouTubeVideoID string            `json:"youtube_video_id,omitempty"`
 	Links          map[string]string `json:"links"`
 }
@@ -59,13 +62,22 @@ func main() {
 	}
 
 	res := resolver.New()
+	var httpClient = &http.Client{Timeout: 8 * time.Second}
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 
-	mux.HandleFunc("GET /api/resolve", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/resolve", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		qrURL := r.URL.Query().Get("url")
 		if qrURL == "" {
 			writeJSON(w, http.StatusBadRequest, errResponse{"missing url parameter"})
@@ -85,22 +97,24 @@ func main() {
 		}
 
 		// Enrich: Spotify oEmbed → artist/title
-		artist, title := fetchSpotifyMeta(spotifyID)
+		artist, title := fetchSpotifyMeta(r.Context(), httpClient, spotifyID)
 		if artist != "" {
 			// ytArtist/ytTitle start as Spotify values; iTunes may overwrite with cleaner metadata.
 			ytArtist, ytTitle := artist, title
 
-			// iTunes → year, artwork, Apple Music URL, canonical artist/title
-			if track, err := itunes.Search(artist, title); err == nil {
+			// Try metadata provider chain (parallel providers)
+			if track, err := metadata.Resolve(r.Context(), artist, title); err == nil {
 				resp.Artist = track.Artist
 				resp.Title = track.Title
 				resp.Year = track.Year
 				resp.ArtworkURL = track.ArtworkURL
-				resp.AppleMusicURL = track.AppleMusicURL
+				if track.AppleMusicURL != "" {
+					resp.Links["apple_music"] = track.AppleMusicURL
+				}
 				resp.Links = resolver.StreamingLinks(track.Artist, track.Title)
 				ytArtist, ytTitle = track.Artist, track.Title
 			} else {
-				slog.Warn("itunes search failed", "artist", artist, "title", title, "err", err)
+				slog.Warn("metadata resolve failed", "artist", artist, "title", title, "err", err)
 				resp.Artist = artist
 				resp.Title = title
 				resp.Links = resolver.StreamingLinks(artist, title)
@@ -108,7 +122,7 @@ func main() {
 
 			// YouTube video ID via Invidious — always attempt, even when iTunes fails.
 			allowVariants := r.URL.Query().Get("yt_variants") == "1"
-			if videoID, err := youtube.SearchVideoID(ytArtist, ytTitle, allowVariants); err == nil {
+			if videoID, err := youtube.SearchVideoID(r.Context(), ytArtist, ytTitle, allowVariants); err == nil {
 				resp.YouTubeVideoID = videoID
 			} else {
 				slog.Warn("youtube search failed", "artist", ytArtist, "title", ytTitle, "err", err)
@@ -120,24 +134,51 @@ func main() {
 	})
 
 	handler := cors(mux)
-	slog.Info("musicguessr backend starting", "port", port)
-	if err := http.ListenAndServe(":"+port, handler); err != nil {
-		slog.Error("server failed", "err", err)
+	srv := &http.Server{Addr: ":" + port, Handler: handler}
+
+	// Graceful shutdown
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		slog.Info("musicguessr backend starting", "port", port)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("server failed", "err", err)
+			os.Exit(1)
+		}
+	}()
+
+	<-stop
+	slog.Info("shutdown signal received, shutting down server")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		slog.Error("graceful shutdown failed", "err", err)
 		os.Exit(1)
 	}
 }
 
-func fetchSpotifyMeta(trackID string) (artist, title string) {
-	resp, err := http.Get("https://open.spotify.com/track/" + trackID)
+func fetchSpotifyMeta(ctx context.Context, client *http.Client, trackID string) (artist, title string) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://open.spotify.com/track/"+trackID, nil)
+	if err != nil {
+		slog.Error("spotify request creation failed", "trackID", trackID, "err", err)
+		return "", ""
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		slog.Error("spotify page fetch failed", "trackID", trackID, "err", err)
 		return "", ""
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		slog.Error("spotify page non-200", "trackID", trackID, "status", resp.StatusCode)
+		return "", ""
+	}
 
-	body := make([]byte, 32*1024) // read first 32KB, meta tags are in <head>
-	n, _ := io.ReadFull(resp.Body, body)
-	html := string(body[:n])
+	// read up to first 32KB of the response
+	limited := io.LimitReader(resp.Body, 32*1024)
+	body, _ := io.ReadAll(limited)
+	html := string(body)
 
 	// og:title → track title. Spotify uses several formats:
 	//   "Track Name - song by Artist | Spotify"          (most common)

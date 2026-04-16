@@ -43,6 +43,28 @@ go build ./cmd/server
 go run ./cmd/server
 ```
 
+## Environment variables
+
+The server and metadata providers use several environment variables. Defaults shown where applicable.
+
+- `PORT` — TCP port the HTTP server listens on. Default: `8080`.
+- `LOG_LEVEL` — set to `debug` to enable debug logging (optional).
+- `INVIDIOUS_INSTANCES` — comma-separated list of Invidious instances used for YouTube lookups. Default includes `https://iv.melmac.space,https://invidious.darkness.services`.
+- `METADATA_CACHE_TTL_SECONDS` — TTL for the in-memory metadata cache in seconds. Default: `86400` (24h).
+- `DISCOGS_TOKEN` — (optional) Discogs API token. If set, the Discogs provider will be used.
+- `THEAUDIODB_KEY` — (optional) TheAudioDB API key. If unset, the public key `1` is used.
+
+Notes:
+- The metadata layer performs parallel lookups across multiple providers (iTunes, MusicBrainz, Deezer, Discogs, TheAudioDB) and aggregates results. Provide `DISCOGS_TOKEN`/`THEAUDIODB_KEY` if you want to enable those providers.
+- `METADATA_CACHE_TTL_SECONDS` can be tuned to reduce external requests and respect provider rate limits.
+- MusicBrainz requires a sensible `User-Agent` header and has rate limits; the code uses a default UA string. Consider adding caching and backoff when running at scale.
+
+Example (macOS / Linux):
+
+```bash
+PORT=8080 LOG_LEVEL=debug DISCOGS_TOKEN=your_token go run ./cmd/server
+```
+
 ## Docker
 
 Build image:
