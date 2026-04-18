@@ -16,7 +16,14 @@ import (
 	"github.com/musicguessr/musicguessr-backend/internal/itunes"
 )
 
-var httpClient = &http.Client{Timeout: 6 * time.Second}
+var httpClient = &http.Client{
+	Timeout: 6 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 10,
+		IdleConnTimeout:     30 * time.Second,
+	},
+}
 var musicbrainzUserAgent = "musicguessr/0.1 (https://github.com/musicguessr)"
 var cacheTTL = 24 * time.Hour
 
@@ -107,7 +114,7 @@ func Resolve(ctx context.Context, artist, title string) (*itunes.Track, error) {
 		close(ch)
 	}()
 
-	var results []pres
+	results := make([]pres, 0, len(providers))
 	for r := range ch {
 		results = append(results, r)
 	}
@@ -117,10 +124,11 @@ func Resolve(ctx context.Context, artist, title string) (*itunes.Track, error) {
 	}
 
 	// Aggregate fields
-	var artists, titles []string
-	var years []int
-	var apples []string
-	var artworks []string
+	artists := make([]string, 0, len(results))
+	titles := make([]string, 0, len(results))
+	years := make([]int, 0, len(results))
+	apples := make([]string, 0, len(results))
+	artworks := make([]string, 0, len(results))
 	for _, r := range results {
 		if r.t.Artist != "" {
 			artists = append(artists, normalizeKey(r.t.Artist))
@@ -516,8 +524,13 @@ func firstNonEmpty(ss ...string) string {
 	return ""
 }
 
-// checkArtwork does a HEAD request and returns true if status 200.
+// checkArtwork validates artwork availability. Only Cover Art Archive URLs are checked
+// via HEAD request since they frequently 404. Other CDN providers (iTunes, Deezer,
+// TheAudioDB, Discogs) are assumed to be stable and skipped to save latency.
 func checkArtwork(ctx context.Context, u string) bool {
+	if !strings.Contains(u, "coverartarchive.org") {
+		return true
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, u, nil)
 	if err != nil {
 		return false

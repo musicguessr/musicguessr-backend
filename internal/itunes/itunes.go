@@ -31,7 +31,14 @@ type result struct {
 	} `json:"results"`
 }
 
-var client = &http.Client{Timeout: 5 * time.Second}
+var client = &http.Client{
+	Timeout: 5 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        50,
+		MaxIdleConnsPerHost: 10,
+		IdleConnTimeout:     30 * time.Second,
+	},
+}
 
 func Search(ctx context.Context, artist, title string) (*Track, error) {
 	vals := url.Values{}

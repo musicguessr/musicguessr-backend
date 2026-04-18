@@ -27,9 +27,17 @@ var defaultInstances = []string{
 	"https://invidious.darkness.services",
 }
 
-var client = &http.Client{Timeout: 6 * time.Second}
+var client = &http.Client{
+	Timeout: 6 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        50,
+		MaxIdleConnsPerHost: 10,
+		IdleConnTimeout:     30 * time.Second,
+	},
+}
 
-func instances() []string {
+// Instances returns the list of Invidious instances to use, from INVIDIOUS_INSTANCES env var or defaults.
+func Instances() []string {
 	env := os.Getenv("INVIDIOUS_INSTANCES")
 	if env == "" {
 		return defaultInstances
@@ -61,7 +69,7 @@ func SearchVideoID(ctx context.Context, artist, title string, allowVariants bool
 	// - removes commas and brackets that can break query parsing
 	q := url.QueryEscape(normalizeForQuery(artist) + " " + normalizeForQuery(coreTitle(title)))
 	slog.Info("youtube search start", "artist", artist, "title", title, "allowVariants", allowVariants)
-	for _, inst := range instances() {
+	for _, inst := range Instances() {
 		id, score, variant, err := tryInstance(ctx, inst, q, artist, title, allowVariants)
 		if err != nil {
 			slog.Warn("invidious instance failed", "instance", inst, "err", err)

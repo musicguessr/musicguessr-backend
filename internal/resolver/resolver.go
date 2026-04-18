@@ -14,6 +14,17 @@ import (
 	"time"
 )
 
+var resolverHTTPClient = &http.Client{
+	Timeout: 15 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        20,
+		MaxIdleConnsPerHost: 10,
+		IdleConnTimeout:     30 * time.Second,
+	},
+}
+
+const maxGamesetBodySize = 32 << 20 // 32 MB
+
 const (
 	assetsBase   = "https://stgroupprdhitster.blob.core.windows.net/hitster-assets"
 	gamesetDB    = assetsBase + "/gameset_database.json"
@@ -87,7 +98,7 @@ func (r *Resolver) Resolve(rawURL string) (string, error) {
 
 func (r *Resolver) load() error {
 	slog.Info("loading gameset database")
-	resp, err := http.Get(gamesetDB)
+	resp, err := resolverHTTPClient.Get(gamesetDB)
 	if err != nil {
 		return err
 	}
@@ -95,7 +106,7 @@ func (r *Resolver) load() error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("gameset DB returned status %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxGamesetBodySize))
 	if err != nil {
 		return err
 	}
@@ -140,7 +151,7 @@ func (r *Resolver) refreshLoop() {
 }
 
 func fetchTimestamp() (int64, error) {
-	resp, err := http.Get(timestampURL)
+	resp, err := resolverHTTPClient.Get(timestampURL)
 	if err != nil {
 		return 0, err
 	}

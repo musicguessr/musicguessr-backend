@@ -1,6 +1,7 @@
 package main
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"io"
@@ -9,13 +10,58 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/musicguessr/musicguessr-backend/internal/deck"
+	"github.com/musicguessr/musicguessr-backend/internal/deckstore"
 	"github.com/musicguessr/musicguessr-backend/internal/metadata"
 	"github.com/musicguessr/musicguessr-backend/internal/resolver"
 	"github.com/musicguessr/musicguessr-backend/internal/youtube"
 )
+
+// sharedTransport is reused by all HTTP clients for connection pooling.
+var sharedTransport = &http.Transport{
+	MaxIdleConns:        100,
+	MaxIdleConnsPerHost: 10,
+	IdleConnTimeout:     30 * time.Second,
+}
+
+// Spotify oEmbed cache — avoids re-fetching the same track HTML on every scan.
+type spotifyCacheEntry struct {
+	artist, title string
+	expires       time.Time
+}
+
+var (
+	spotifyCacheMu sync.RWMutex
+	spotifyCache   = map[string]spotifyCacheEntry{}
+)
+
+const spotifyCacheTTL = 7 * 24 * time.Hour
+
+// gzipResponseWriter wraps http.ResponseWriter to compress the body.
+type gzipResponseWriter struct {
+	http.ResponseWriter
+	gz *gzip.Writer
+}
+
+func (g *gzipResponseWriter) Write(b []byte) (int, error) { return g.gz.Write(b) }
+
+func gzipMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Vary", "Accept-Encoding")
+		gz := gzip.NewWriter(w)
+		defer gz.Close()
+		next.ServeHTTP(&gzipResponseWriter{ResponseWriter: w, gz: gz}, r)
+	})
+}
 
 type resolveResponse struct {
 	SpotifyID      string            `json:"spotify_id"`
@@ -35,7 +81,7 @@ type errResponse struct {
 func cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -62,8 +108,21 @@ func main() {
 	}
 
 	res := resolver.New()
-	var httpClient = &http.Client{Timeout: 8 * time.Second}
+	var httpClient = &http.Client{Timeout: 8 * time.Second, Transport: sharedTransport}
+
+	store, err := deckstore.New()
+	if err != nil {
+		slog.Error("deckstore init failed", "err", err)
+		os.Exit(1)
+	}
+	deckHandler := deck.NewHandler(store)
+
 	mux := http.NewServeMux()
+
+	mux.HandleFunc("/api/deck/validate-yt", deck.ValidateYtHandler)
+	mux.HandleFunc("/api/deck/import-playlist", deck.ImportPlaylistHandler)
+	mux.HandleFunc("/api/deck/", deckHandler.GetDeck)
+	mux.HandleFunc("/api/deck", deckHandler.CreateDeck)
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -133,7 +192,7 @@ func main() {
 		writeJSON(w, http.StatusOK, resp)
 	})
 
-	handler := cors(mux)
+	handler := gzipMiddleware(cors(mux))
 	srv := &http.Server{Addr: ":" + port, Handler: handler}
 
 	// Graceful shutdown
@@ -159,6 +218,13 @@ func main() {
 }
 
 func fetchSpotifyMeta(ctx context.Context, client *http.Client, trackID string) (artist, title string) {
+	spotifyCacheMu.RLock()
+	if e, ok := spotifyCache[trackID]; ok && time.Now().Before(e.expires) {
+		spotifyCacheMu.RUnlock()
+		return e.artist, e.title
+	}
+	spotifyCacheMu.RUnlock()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://open.spotify.com/track/"+trackID, nil)
 	if err != nil {
 		slog.Error("spotify request creation failed", "trackID", trackID, "err", err)
@@ -230,6 +296,11 @@ func fetchSpotifyMeta(ctx context.Context, client *http.Client, trackID string) 
 	}
 
 	slog.Debug("spotify meta resolved", "trackID", trackID, "artist", artist, "title", title)
+	if artist != "" || title != "" {
+		spotifyCacheMu.Lock()
+		spotifyCache[trackID] = spotifyCacheEntry{artist: artist, title: title, expires: time.Now().Add(spotifyCacheTTL)}
+		spotifyCacheMu.Unlock()
+	}
 	return
 }
 

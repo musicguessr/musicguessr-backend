@@ -8,8 +8,10 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /backend ./cmd/server
 FROM alpine:3.23
 RUN apk add --no-cache ca-certificates tzdata
 RUN addgroup -S app && adduser -S -G app app
+RUN mkdir -p /data/decks && chown -R app:app /data
 USER app
 COPY --from=build /backend /backend
 EXPOSE 8080
 ENV PORT=8080
+ENV DECK_STORAGE_PATH=/data/decks
 ENTRYPOINT ["/backend"]
