@@ -68,7 +68,7 @@ func TestCORS_PassThrough(t *testing.T) {
 
 func TestGzipMiddleware_WithoutEncoding(t *testing.T) {
 	handler := gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("hello world"))
+		_, _ = w.Write([]byte("hello world"))
 	}))
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -85,7 +85,7 @@ func TestGzipMiddleware_WithoutEncoding(t *testing.T) {
 
 func TestGzipMiddleware_WithGzipEncoding(t *testing.T) {
 	handler := gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("hello world"))
+		_, _ = w.Write([]byte("hello world"))
 	}))
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -101,7 +101,7 @@ func TestGzipMiddleware_WithGzipEncoding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gzip.NewReader: %v", err)
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	body, err := io.ReadAll(r)
 	if err != nil {

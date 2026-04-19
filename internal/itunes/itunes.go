@@ -55,10 +55,10 @@ func Search(ctx context.Context, artist, title string) (*Track, error) {
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, fmt.Errorf("itunes search returned status %d", resp.StatusCode)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var r result
 	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
@@ -74,7 +74,7 @@ func Search(ctx context.Context, artist, title string) (*Track, error) {
 		if t, err := time.Parse(time.RFC3339, item.ReleaseDate); err == nil {
 			year = t.Year()
 		} else if len(item.ReleaseDate) >= 4 {
-			fmt.Sscanf(item.ReleaseDate[:4], "%d", &year)
+			_, _ = fmt.Sscanf(item.ReleaseDate[:4], "%d", &year)
 		}
 	}
 

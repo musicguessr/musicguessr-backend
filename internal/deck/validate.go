@@ -105,16 +105,16 @@ func fetchInvidiousVideoMeta(ctx context.Context, ytID string) (title, artist st
 			continue
 		}
 		if resp.StatusCode == http.StatusNotFound {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			return "", "", fmt.Errorf("video not found")
 		}
 		if resp.StatusCode != http.StatusOK {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			continue
 		}
 		var meta invidiousVideoMeta
 		e = json.NewDecoder(resp.Body).Decode(&meta)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if e != nil {
 			continue
 		}
@@ -126,5 +126,7 @@ func fetchInvidiousVideoMeta(ctx context.Context, ytID string) (title, artist st
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		slog.Error("writeJSON encode failed", "err", err)
+	}
 }
