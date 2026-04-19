@@ -277,7 +277,7 @@ func musicBrainzSearch(ctx context.Context, artist, title string) (*itunes.Track
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("musicbrainz status %d", resp.StatusCode)
 	}
@@ -314,7 +314,7 @@ func musicBrainzSearch(ctx context.Context, artist, title string) (*itunes.Track
 		rel := rec.Releases[0]
 		if rel.Date != "" && len(rel.Date) >= 4 {
 			var y int
-			fmt.Sscanf(rel.Date[:4], "%d", &y)
+			_, _ = fmt.Sscanf(rel.Date[:4], "%d", &y)
 			year = y
 		}
 		// Construct Cover Art Archive URL (may 404 when not available)
@@ -344,7 +344,7 @@ func deezerSearch(ctx context.Context, artist, title string) (*itunes.Track, err
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("deezer status %d", resp.StatusCode)
 	}
@@ -397,7 +397,7 @@ func deezerAlbumYear(ctx context.Context, albumID int) int {
 	if err != nil {
 		return 0
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return 0
 	}
@@ -409,7 +409,7 @@ func deezerAlbumYear(ctx context.Context, albumID int) int {
 	}
 	year := 0
 	if len(a.ReleaseDate) >= 4 {
-		fmt.Sscanf(a.ReleaseDate[:4], "%d", &year)
+		_, _ = fmt.Sscanf(a.ReleaseDate[:4], "%d", &year)
 	}
 	return year
 }
@@ -434,7 +434,7 @@ func discogsSearch(ctx context.Context, artist, title string) (*itunes.Track, er
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("discogs status %d", resp.StatusCode)
 	}
@@ -482,7 +482,7 @@ func theAudioDBSearch(ctx context.Context, artist, title string) (*itunes.Track,
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("theaudiodb status %d", resp.StatusCode)
 	}
@@ -504,7 +504,7 @@ func theAudioDBSearch(ctx context.Context, artist, title string) (*itunes.Track,
 	item := t.Track[0]
 	year := 0
 	if item.IntYear != "" {
-		fmt.Sscanf(item.IntYear, "%d", &year)
+		_, _ = fmt.Sscanf(item.IntYear, "%d", &year)
 	}
 	return &itunes.Track{
 		Artist:        item.StrArtist,
@@ -539,7 +539,7 @@ func checkArtwork(ctx context.Context, u string) bool {
 	if err != nil {
 		return false
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return resp.StatusCode == http.StatusOK
 }
 

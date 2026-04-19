@@ -205,17 +205,17 @@ func fetchPlaylistPage(ctx context.Context, playlistID string, page int) ([]invi
 			continue
 		}
 		if resp.StatusCode == http.StatusNotFound {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			return nil, fmt.Errorf("playlist not found or is private")
 		}
 		if resp.StatusCode != http.StatusOK {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			slog.Warn("invidious playlist bad status", "instance", inst, "status", resp.StatusCode)
 			continue
 		}
 		var pl invidiousPlaylist
 		err = json.NewDecoder(resp.Body).Decode(&pl)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if err != nil {
 			slog.Warn("invidious playlist decode failed", "instance", inst, "err", err)
 			continue

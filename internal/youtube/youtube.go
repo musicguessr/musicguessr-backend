@@ -98,7 +98,7 @@ func tryInstance(ctx context.Context, instance, query, artist, title string, all
 	if err != nil {
 		return "", 0, false, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return "", 0, false, fmt.Errorf("status %d", resp.StatusCode)
 	}

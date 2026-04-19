@@ -102,7 +102,7 @@ func (r *Resolver) load() error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("gameset DB returned status %d", resp.StatusCode)
 	}
@@ -155,7 +155,7 @@ func fetchTimestamp() (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return 0, fmt.Errorf("timestamp endpoint returned %d", resp.StatusCode)
 	}
