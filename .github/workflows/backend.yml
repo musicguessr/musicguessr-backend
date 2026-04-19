@@ -1,0 +1,59 @@
+name: Backend CI
+
+on:
+  push:
+    paths:
+      - '**/*.go'
+      - 'go.mod'
+      - '.golangci.yml'
+      - '.github/workflows/backend.yml'
+  pull_request:
+    paths:
+      - '**/*.go'
+      - 'go.mod'
+      - '.golangci.yml'
+      - '.github/workflows/backend.yml'
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Run tests
+        run: go test -race ./...
+
+  build:
+    name: Build & Health Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        run: CGO_ENABLED=0 go build -o /tmp/backend ./cmd/server
+      - name: Health check
+        run: |
+          DECK_STORAGE_PROVIDER=local PORT=18080 /tmp/backend &
+          for i in $(seq 1 15); do
+            sleep 1
+            curl --silent --fail http://localhost:18080/health && kill %1 && exit 0
+          done
+          kill %1
+          exit 1
