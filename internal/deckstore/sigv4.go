@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
-	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -117,6 +116,24 @@ func buildCanonicalHeaders(req *http.Request) (signedHeaders, canonicalHeaders s
 	return strings.Join(keys, ";"), strings.Join(hdrs, "\n") + "\n"
 }
 
+// awsQueryEscape percent-encodes a query key/value per SigV4's rules (RFC 3986,
+// unreserved chars A-Z a-z 0-9 - _ . ~ left alone, everything else %XX-encoded —
+// crucially space becomes %20, not the '+' that url.QueryEscape produces for
+// application/x-www-form-urlencoded bodies).
+func awsQueryEscape(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+			c == '-' || c == '_' || c == '.' || c == '~' {
+			b.WriteByte(c)
+		} else {
+			fmt.Fprintf(&b, "%%%02X", c)
+		}
+	}
+	return b.String()
+}
+
 func buildCanonicalQuery(req *http.Request) string {
 	q := req.URL.Query()
 	if len(q) == 0 {
@@ -129,8 +146,12 @@ func buildCanonicalQuery(req *http.Request) string {
 	sort.Strings(keys)
 	var parts []string
 	for _, k := range keys {
-		for _, v := range q[k] {
-			parts = append(parts, url.QueryEscape(k)+"="+url.QueryEscape(v))
+		// SigV4 requires values for a repeated key sorted too, not left in
+		// their original request order.
+		vs := append([]string(nil), q[k]...)
+		sort.Strings(vs)
+		for _, v := range vs {
+			parts = append(parts, awsQueryEscape(k)+"="+awsQueryEscape(v))
 		}
 	}
 	return strings.Join(parts, "&")

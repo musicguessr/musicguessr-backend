@@ -68,6 +68,21 @@ func TestResolve(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "spoofed host with hitstergame.com as substring",
+			url:     "https://evilhitstergame.com/en/TESTDECK/42",
+			wantErr: true,
+		},
+		{
+			name:    "spoofed host with hitstergame.com as path prefix",
+			url:     "https://example.com/hitstergame.com/en/TESTDECK/42",
+			wantErr: true,
+		},
+		{
+			name:    "spoofed host with hitstergame.com followed by attacker suffix",
+			url:     "https://hitstergame.com.evil.tld/en/TESTDECK/42",
+			wantErr: true,
+		},
+		{
 			name:    "empty string",
 			url:     "",
 			wantErr: true,

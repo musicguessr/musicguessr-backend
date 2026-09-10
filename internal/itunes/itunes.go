@@ -64,7 +64,10 @@ func Search(ctx context.Context, artist, title string) (*Track, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
 		return nil, err
 	}
-	if r.ResultCount == 0 {
+	// resultCount is the API's self-reported count, not necessarily len(Results) —
+	// check the actual slice length too, or a divergence (throttling/API quirk)
+	// panics on the index below instead of returning "no results".
+	if r.ResultCount == 0 || len(r.Results) == 0 {
 		return nil, fmt.Errorf("no results")
 	}
 

@@ -3,10 +3,9 @@ package deck
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"log/slog"
 	"net/http"
-	"time"
 
 	"github.com/musicguessr/musicguessr-backend/internal/metadata"
 	"github.com/musicguessr/musicguessr-backend/internal/youtube"
@@ -20,15 +19,6 @@ type validateResponse struct {
 	Year    int    `json:"year,omitempty"`
 	Artwork string `json:"artwork,omitempty"`
 	Error   string `json:"error,omitempty"`
-}
-
-var invClient = &http.Client{
-	Timeout: 6 * time.Second,
-	Transport: &http.Transport{
-		MaxIdleConns:        50,
-		MaxIdleConnsPerHost: 10,
-		IdleConnTimeout:     30 * time.Second,
-	},
 }
 
 func ValidateYtHandler(w http.ResponseWriter, r *http.Request) {
@@ -54,7 +44,16 @@ func ValidateYtHandler(w http.ResponseWriter, r *http.Request) {
 
 	title, artist, err := fetchInvidiousVideoMeta(r.Context(), ytID)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, validateResponse{Valid: false, Error: "video not found or unavailable"})
+		if errors.Is(err, youtube.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, validateResponse{Valid: false, Error: "video not found or unavailable"})
+			return
+		}
+		// Every instance failed for infrastructure reasons (network/5xx/bad
+		// JSON) — this is not evidence the video/URL itself is invalid, so it
+		// must not be reported as 404 "not found" (misleads the user into
+		// thinking their valid link is bad).
+		slog.Warn("validate-yt: all invidious instances failed", "ytID", ytID, "err", err)
+		writeJSON(w, http.StatusServiceUnavailable, validateResponse{Valid: false, Error: "could not verify video right now, try again shortly"})
 		return
 	}
 
@@ -92,35 +91,14 @@ type invidiousVideoMeta struct {
 }
 
 func fetchInvidiousVideoMeta(ctx context.Context, ytID string) (title, artist string, err error) {
-	for _, inst := range youtube.Instances() {
-		reqURL := inst + "/api/v1/videos/" + ytID + "?fields=title,author"
-		req, e := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-		if e != nil {
-			continue
-		}
-		req.Header.Set("User-Agent", "musicguessr/1.0")
-		resp, e := invClient.Do(req)
-		if e != nil {
-			slog.Warn("invidious video meta failed", "instance", inst, "err", e)
-			continue
-		}
-		if resp.StatusCode == http.StatusNotFound {
-			_ = resp.Body.Close()
-			return "", "", fmt.Errorf("video not found")
-		}
-		if resp.StatusCode != http.StatusOK {
-			_ = resp.Body.Close()
-			continue
-		}
-		var meta invidiousVideoMeta
-		e = json.NewDecoder(resp.Body).Decode(&meta)
-		_ = resp.Body.Close()
-		if e != nil {
-			continue
-		}
-		return meta.Title, meta.Author, nil
+	var meta invidiousVideoMeta
+	err = youtube.FetchJSON(ctx, func(inst string) string {
+		return inst + "/api/v1/videos/" + ytID + "?fields=title,author"
+	}, &meta)
+	if err != nil {
+		return "", "", err
 	}
-	return "", "", fmt.Errorf("all invidious instances failed for %s", ytID)
+	return meta.Title, meta.Author, nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

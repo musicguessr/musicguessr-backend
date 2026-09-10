@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/musicguessr/musicguessr-backend/internal/deckstore"
-	"github.com/musicguessr/musicguessr-backend/internal/itunes"
+	"github.com/musicguessr/musicguessr-backend/internal/metadata"
 )
 
 var deckIDRe = regexp.MustCompile(`^[0-9A-Za-z]{1,32}$`)
@@ -28,8 +28,8 @@ var ttlMap = map[string]time.Duration{
 }
 
 const (
-	maxCards    = 300
-	defaultTTL  = "3months"
+	maxCards   = 300
+	defaultTTL = "3months"
 )
 
 type Handler struct {
@@ -64,9 +64,13 @@ func (h *Handler) CreateDeck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.TTL == "" {
+		req.TTL = defaultTTL
+	}
 	ttl, ok := ttlMap[req.TTL]
 	if !ok {
-		ttl = ttlMap[defaultTTL]
+		writeJSON(w, http.StatusBadRequest, errResp("invalid ttl: must be one of 1week, 1month, 3months, 6months, 1year"))
+		return
 	}
 
 	// First pass: validate all URLs synchronously so we fail fast before any network I/O.
@@ -80,19 +84,27 @@ func (h *Handler) CreateDeck(w http.ResponseWriter, r *http.Request) {
 		cards[i] = Card{YtID: ytID, Title: c.Title, Artist: c.Artist, Year: c.Year}
 	}
 
-	// Second pass: best-effort iTunes enrichment, concurrent with a semaphore (max 10 at once).
+	// Second pass: best-effort metadata enrichment for cards missing title/artist/
+	// year/artwork, bounded to enrichConcurrency in flight at once. The semaphore
+	// is acquired before the goroutine is spawned (not inside it) so at most
+	// enrichConcurrency goroutines exist at a time instead of up to maxCards.
 	const enrichConcurrency = 10
 	sem := make(chan struct{}, enrichConcurrency)
 	var wg sync.WaitGroup
 	for i, card := range cards {
-		if card.Title == "" || card.Artist == "" {
+		if card.Title != "" && card.Artist != "" && card.Year != 0 && card.Artwork != "" {
 			continue
 		}
+		sem <- struct{}{}
 		wg.Add(1)
 		go func(i int, card Card) {
 			defer wg.Done()
-			sem <- struct{}{}
 			defer func() { <-sem }()
+			defer func() {
+				if rec := recover(); rec != nil {
+					slog.Error("enrichCard panicked", "card", i, "panic", rec)
+				}
+			}()
 			cards[i] = enrichCard(r.Context(), card)
 		}(i, card)
 	}
@@ -176,12 +188,28 @@ func (h *Handler) GetDeck(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, deck)
 }
 
+// enrichCard fills in whichever of title/artist/year/artwork the card is
+// missing. It goes through metadata.Resolve — the same multi-provider,
+// majority-voted, cached lookup used by /api/resolve and /api/deck/import-
+// playlist — rather than a single-provider iTunes-only call, so manually
+// entered cards get the same enrichment quality as imported-playlist cards.
 func enrichCard(ctx context.Context, card Card) Card {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	track, err := itunes.Search(ctx, card.Artist, card.Title)
+	// metadata.Resolve needs at least one of artist/title as a search seed;
+	// a card with neither can't be enriched.
+	if card.Artist == "" && card.Title == "" {
+		return card
+	}
+	track, err := metadata.Resolve(ctx, card.Artist, card.Title)
 	if err != nil {
 		return card
+	}
+	if card.Title == "" {
+		card.Title = track.Title
+	}
+	if card.Artist == "" {
+		card.Artist = track.Artist
 	}
 	if card.Artwork == "" {
 		card.Artwork = track.ArtworkURL

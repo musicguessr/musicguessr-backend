@@ -16,7 +16,7 @@ Stateless Go HTTP backend for the MusicGuessr application. Resolves Hitster QR c
 
 ## Prerequisites
 
-- Go 1.23+
+- Go 1.27+
 - Docker (optional)
 
 ## Quick start (local)

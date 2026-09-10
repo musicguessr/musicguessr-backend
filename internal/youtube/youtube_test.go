@@ -164,6 +164,18 @@ func TestInstances_Default(t *testing.T) {
 	}
 }
 
+func TestInstances_BlankAfterTrimFallsBackToDefaults(t *testing.T) {
+	for _, env := range []string{" ", ",", " , ,"} {
+		t.Run(env, func(t *testing.T) {
+			t.Setenv("INVIDIOUS_INSTANCES", env)
+			got := Instances()
+			if len(got) == 0 {
+				t.Errorf("expected fallback to default instances for INVIDIOUS_INSTANCES=%q, got none", env)
+			}
+		})
+	}
+}
+
 func TestInstances_FromEnv(t *testing.T) {
 	t.Setenv("INVIDIOUS_INSTANCES", "https://a.example.com, https://b.example.com")
 	got := Instances()

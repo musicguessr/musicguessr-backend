@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -34,10 +35,15 @@ func newS3(cfg s3Config) (*s3Store, error) {
 		return nil, fmt.Errorf("deckstore/s3: DECK_STORAGE_ACCESS_KEY_ID and DECK_STORAGE_SECRET_ACCESS_KEY are required")
 	}
 	if cfg.region == "" {
+		// "auto" is meaningful for Cloudflare R2 but not for real AWS S3 or
+		// other S3-compatible providers — log it so a deployer pointing at a
+		// provider that needs a real region sees why every request suddenly
+		// fails signature verification, instead of silently getting "auto".
+		slog.Warn("DECK_STORAGE_REGION not set, defaulting to \"auto\" (correct for Cloudflare R2; set explicitly for AWS S3 or other providers)")
 		cfg.region = "auto"
 	}
 	return &s3Store{
-		cfg:    cfg,
+		cfg: cfg,
 		client: &http.Client{
 			Timeout: 15 * time.Second,
 			Transport: &http.Transport{
@@ -92,5 +98,18 @@ func (s *s3Store) Get(ctx context.Context, id string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("deckstore/s3: GET returned %d", resp.StatusCode)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, 4<<20)) // 4 MB max per deck
+	const maxSize = 4 << 20 // 4 MB max per deck
+	// Read one byte past the limit so a truncated body can be told apart from
+	// one that legitimately ends exactly at maxSize — io.ReadAll(io.LimitReader(...))
+	// alone returns err == nil either way, so local/memory (no size limit) and
+	// s3 (silently truncating) would behave differently for an oversized deck,
+	// surfacing only as a downstream "corrupted deck data" JSON error.
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxSize+1))
+	if err != nil {
+		return nil, fmt.Errorf("deckstore/s3: read body: %w", err)
+	}
+	if len(data) > maxSize {
+		return nil, fmt.Errorf("deckstore/s3: object exceeds %d byte limit", maxSize)
+	}
+	return data, nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -12,6 +13,22 @@ import (
 	"strings"
 	"time"
 )
+
+// UserAgent is sent on every outbound request to Invidious instances — a
+// single source of truth so it can't drift between call sites.
+const UserAgent = "musicguessr/1.0 (+https://github.com/musicguessr)"
+
+// ErrNotFound is returned by FetchJSON when an Invidious instance gives a
+// confirmed 404 for the requested resource — a definitive negative that
+// should stop the failover loop immediately, distinct from every instance
+// being unreachable/erroring (ErrAllInstancesFailed).
+var ErrNotFound = errors.New("youtube: resource not found")
+
+// ErrAllInstancesFailed is returned by FetchJSON when every configured
+// Invidious instance failed for reasons other than a confirmed 404
+// (network error, non-200/404 status, bad JSON) — an infrastructure
+// problem, not evidence the requested resource doesn't exist.
+var ErrAllInstancesFailed = errors.New("youtube: all invidious instances failed")
 
 //go:embed filters.json
 var filtersJSON []byte
@@ -50,7 +67,59 @@ func Instances() []string {
 			out = append(out, p)
 		}
 	}
+	// A set env var that reduces to zero usable entries after trim/split
+	// (a blank string, a comma-only value) is almost certainly a deploy
+	// misconfiguration, not an intentional "use no instances" — fall back to
+	// the defaults rather than making every YouTube-dependent endpoint fail
+	// uniformly with no signal pointing at the actual cause.
+	if len(out) == 0 {
+		slog.Warn("INVIDIOUS_INSTANCES set but yielded no usable entries, falling back to defaults", "raw", env)
+		return defaultInstances
+	}
 	return out
+}
+
+// FetchJSON tries each configured Invidious instance in turn — buildURL(instance)
+// builds the request URL for that instance — decoding the first 200 response's
+// JSON body into out. A confirmed 404 from any instance stops the loop
+// immediately and returns ErrNotFound (trying other instances wouldn't turn a
+// real "not found" into a "found"); any other per-instance failure (network
+// error, non-200 status, bad JSON) is logged and the next instance is tried.
+// If every instance fails that way, ErrAllInstancesFailed is returned.
+func FetchJSON(ctx context.Context, buildURL func(instance string) string, out any) error {
+	instances := Instances()
+	for _, inst := range instances {
+		reqURL := buildURL(inst)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+		if err != nil {
+			slog.Warn("invidious request build failed", "instance", inst, "err", err)
+			continue
+		}
+		req.Header.Set("User-Agent", UserAgent)
+		req.Header.Set("Accept", "application/json")
+		resp, err := client.Do(req)
+		if err != nil {
+			slog.Warn("invidious instance request failed", "instance", inst, "err", err)
+			continue
+		}
+		if resp.StatusCode == http.StatusNotFound {
+			_ = resp.Body.Close()
+			return ErrNotFound
+		}
+		if resp.StatusCode != http.StatusOK {
+			slog.Warn("invidious instance bad status", "instance", inst, "status", resp.StatusCode)
+			_ = resp.Body.Close()
+			continue
+		}
+		err = json.NewDecoder(resp.Body).Decode(out)
+		_ = resp.Body.Close()
+		if err != nil {
+			slog.Warn("invidious instance decode failed", "instance", inst, "err", err)
+			continue
+		}
+		return nil
+	}
+	return ErrAllInstancesFailed
 }
 
 type invidiousItem struct {
@@ -92,7 +161,7 @@ func tryInstance(ctx context.Context, instance, query, artist, title string, all
 	if err != nil {
 		return "", 0, false, err
 	}
-	req.Header.Set("User-Agent", "musicguessr/1.0 (+https://github.com/musicguessr)")
+	req.Header.Set("User-Agent", UserAgent)
 	req.Header.Set("Accept", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {

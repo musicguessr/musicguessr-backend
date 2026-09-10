@@ -32,7 +32,39 @@ const (
 	refreshEvery = time.Hour
 )
 
-var qrPattern = regexp.MustCompile(`hitstergame\.com/[^/]+/([a-zA-Z0-9]+)/(\d+)`)
+var (
+	deckIDSegmentRe = regexp.MustCompile(`^[a-zA-Z0-9]+$`)
+	cardIDSegmentRe = regexp.MustCompile(`^\d+$`)
+)
+
+// parseHitsterURL extracts the {deckId}/{cardId} segments from a
+// hitstergame.com/{lang}/{deckId}/{cardId} URL. It parses the URL properly
+// and checks the host exactly, rather than matching "hitstergame.com/..." as
+// a bare substring anywhere in the input — the previous unanchored regex
+// accepted spoofed hosts like "evilhitstergame.com/en/AB1/42" or
+// "hitstergame.com.evil.tld/...".
+func parseHitsterURL(rawURL string) (deckID, cardID string, err error) {
+	u, perr := url.Parse(rawURL)
+	if perr != nil {
+		return "", "", fmt.Errorf("not a valid Hitster URL")
+	}
+	host := strings.ToLower(u.Host)
+	if h, _, ok := strings.Cut(host, ":"); ok {
+		host = h
+	}
+	if host != "hitstergame.com" && !strings.HasSuffix(host, ".hitstergame.com") {
+		return "", "", fmt.Errorf("not a valid Hitster URL")
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) < 3 {
+		return "", "", fmt.Errorf("not a valid Hitster URL")
+	}
+	deck, card := parts[1], parts[2]
+	if !deckIDSegmentRe.MatchString(deck) || !cardIDSegmentRe.MatchString(card) {
+		return "", "", fmt.Errorf("not a valid Hitster URL")
+	}
+	return deck, card, nil
+}
 
 type card struct {
 	CardNumber string `json:"CardNumber"`
@@ -72,13 +104,13 @@ func New() *Resolver {
 }
 
 func (r *Resolver) Resolve(rawURL string) (string, error) {
-	m := qrPattern.FindStringSubmatch(rawURL)
-	if m == nil {
-		return "", fmt.Errorf("not a valid Hitster URL")
+	rawDeckID, rawCardID, err := parseHitsterURL(rawURL)
+	if err != nil {
+		return "", err
 	}
-	deckID := strings.ToLower(m[1])
-	cardID := m[2]
-	if n, err := strconv.Atoi(m[2]); err == nil {
+	deckID := strings.ToLower(rawDeckID)
+	cardID := rawCardID
+	if n, err := strconv.Atoi(rawCardID); err == nil {
 		cardID = fmt.Sprintf("%05d", n)
 	} else {
 		if len(cardID) < 5 {

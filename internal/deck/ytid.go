@@ -9,6 +9,16 @@ import (
 
 var ytIDRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{11}$`)
 
+// isYouTubeHost reports whether host is youtube.com (or a subdomain of it) or
+// youtu.be — anchored so "evilyoutube.com" or "youtube.com.evil.tld" don't match.
+func isYouTubeHost(host string) bool {
+	host = strings.ToLower(host)
+	if h, _, ok := strings.Cut(host, ":"); ok {
+		host = h
+	}
+	return host == "youtube.com" || strings.HasSuffix(host, ".youtube.com") || host == "youtu.be"
+}
+
 // extractYtID returns the 11-character YouTube video ID from a URL or bare ID.
 func extractYtID(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
@@ -16,11 +26,11 @@ func extractYtID(raw string) (string, error) {
 		return raw, nil
 	}
 	u, err := url.Parse(raw)
-	if err != nil {
-		return "", fmt.Errorf("invalid youtube url")
+	if err != nil || !isYouTubeHost(u.Host) {
+		return "", fmt.Errorf("not a youtube.com or youtu.be url")
 	}
 	// youtu.be/{id}
-	if strings.Contains(u.Host, "youtu.be") {
+	if u.Host == "youtu.be" || strings.HasSuffix(strings.ToLower(u.Host), ".youtu.be") {
 		id := strings.TrimPrefix(u.Path, "/")
 		if ytIDRe.MatchString(id) {
 			return id, nil

@@ -55,6 +55,21 @@ func TestExtractYtID(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "non-YouTube domain with v query param",
+			input:   "https://example.com/watch?v=dQw4w9WgXcQ",
+			wantErr: true,
+		},
+		{
+			name:    "non-YouTube domain with embed path",
+			input:   "https://example.com/embed/dQw4w9WgXcQ",
+			wantErr: true,
+		},
+		{
+			name:    "youtube.com as suffix of attacker domain",
+			input:   "https://notyoutube.com.evil.tld/watch?v=dQw4w9WgXcQ",
+			wantErr: true,
+		},
+		{
 			name:    "empty string",
 			input:   "",
 			wantErr: true,

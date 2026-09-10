@@ -4,6 +4,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"html"
 	"io"
 	"log/slog"
 	"net/http"
@@ -58,7 +59,11 @@ func gzipMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("Content-Encoding", "gzip")
 		w.Header().Set("Vary", "Accept-Encoding")
 		gz := gzip.NewWriter(w)
-		defer func() { _ = gz.Close() }()
+		defer func() {
+			if err := gz.Close(); err != nil {
+				slog.Error("gzip close failed", "err", err)
+			}
+		}()
 		next.ServeHTTP(&gzipResponseWriter{ResponseWriter: w, gz: gz}, r)
 	})
 }
@@ -145,6 +150,13 @@ func main() {
 			return
 		}
 
+		// Spotify fetch (8s) + metadata.Resolve (6s) + up to 2 sequential
+		// Invidious instances (6s each) can otherwise sum to ~26s with nothing
+		// bounding the request as a whole.
+		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+		defer cancel()
+		r = r.WithContext(ctx)
+
 		spotifyID, err := res.Resolve(qrURL)
 		if err != nil {
 			writeJSON(w, http.StatusNotFound, errResponse{err.Error()})
@@ -169,10 +181,12 @@ func main() {
 				resp.Title = track.Title
 				resp.Year = track.Year
 				resp.ArtworkURL = track.ArtworkURL
+				// StreamingLinks() only ever returns youtube_music/youtube/tidal/deezer —
+				// it must not clobber the apple_music entry set above.
+				resp.Links = resolver.StreamingLinks(track.Artist, track.Title)
 				if track.AppleMusicURL != "" {
 					resp.Links["apple_music"] = track.AppleMusicURL
 				}
-				resp.Links = resolver.StreamingLinks(track.Artist, track.Title)
 				ytArtist, ytTitle = track.Artist, track.Title
 			} else {
 				slog.Warn("metadata resolve failed", "artist", artist, "title", title, "err", err)
@@ -194,8 +208,20 @@ func main() {
 		writeJSON(w, http.StatusOK, resp)
 	})
 
-	handler := gzipMiddleware(cors(mux))
-	srv := &http.Server{Addr: ":" + port, Handler: handler}
+	// cors must wrap gzip, not the other way round — otherwise an OPTIONS
+	// preflight's empty 204 response (written by cors, never reaching gzip's
+	// body writer) still gets Content-Encoding: gzip/Vary headers set by
+	// gzipMiddleware before cors ever runs, and gz.Close()'s trailer write
+	// fails against the already-204'd ResponseWriter.
+	handler := cors(gzipMiddleware(mux))
+	srv := &http.Server{
+		Addr:              ":" + port,
+		Handler:           handler,
+		ReadTimeout:       15 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 
 	// Graceful shutdown
 	stop := make(chan os.Signal, 1)
@@ -306,13 +332,7 @@ func fetchSpotifyMeta(ctx context.Context, client *http.Client, trackID string) 
 	return
 }
 
-// decodeHTMLEntities replaces common HTML entities with their UTF-8 equivalents.
+// decodeHTMLEntities replaces HTML entities with their UTF-8 equivalents.
 func decodeHTMLEntities(s string) string {
-	s = strings.ReplaceAll(s, "&amp;", "&")
-	s = strings.ReplaceAll(s, "&quot;", `"`)
-	s = strings.ReplaceAll(s, "&#39;", "'")
-	s = strings.ReplaceAll(s, "&apos;", "'")
-	s = strings.ReplaceAll(s, "&lt;", "<")
-	s = strings.ReplaceAll(s, "&gt;", ">")
-	return s
+	return html.UnescapeString(s)
 }

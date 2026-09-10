@@ -1,3 +1,3 @@
 module github.com/musicguessr/musicguessr-backend
 
-go 1.26
+go 1.27

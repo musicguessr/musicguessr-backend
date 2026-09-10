@@ -3,11 +3,11 @@ package deck
 import "time"
 
 type Card struct {
-	YtID     string `json:"yt_id"`
-	Title    string `json:"title,omitempty"`
-	Artist   string `json:"artist,omitempty"`
-	Year     int    `json:"year,omitempty"`
-	Artwork  string `json:"artwork,omitempty"`
+	YtID    string `json:"yt_id"`
+	Title   string `json:"title,omitempty"`
+	Artist  string `json:"artist,omitempty"`
+	Year    int    `json:"year,omitempty"`
+	Artwork string `json:"artwork,omitempty"`
 }
 
 type Deck struct {

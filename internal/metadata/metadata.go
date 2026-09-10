@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,13 +43,24 @@ type Cache interface {
 	Set(key string, t *itunes.Track, ttl time.Duration)
 }
 
-var defaultCache Cache
+var (
+	defaultCacheMu sync.RWMutex
+	defaultCache   Cache
+)
 
 // SetCache replaces the package cache (useful to inject Redis-backed cache).
 func SetCache(c Cache) {
 	if c != nil {
+		defaultCacheMu.Lock()
 		defaultCache = c
+		defaultCacheMu.Unlock()
 	}
+}
+
+func getCache() Cache {
+	defaultCacheMu.RLock()
+	defer defaultCacheMu.RUnlock()
+	return defaultCache
 }
 
 // Resolve tries providers in parallel and returns the first complete result.
@@ -60,9 +71,10 @@ func Resolve(ctx context.Context, artist, title string) (*itunes.Track, error) {
 	defer cancel()
 
 	key := normalizeKey(artist) + "|" + normalizeKey(title)
-	if defaultCache != nil {
-		if v, ok := defaultCache.Get(key); ok {
-			return v, nil
+	cache := getCache()
+	if cache != nil {
+		if v, ok := cache.Get(key); ok {
+			return cloneTrack(v), nil
 		}
 	}
 
@@ -88,6 +100,14 @@ func Resolve(ctx context.Context, artist, title string) (*itunes.Track, error) {
 		wg.Add(1)
 		go func(name string, fn func(context.Context, string, string) (*itunes.Track, error)) {
 			defer wg.Done()
+			// A panicking provider goroutine (e.g. a third-party API returning
+			// an inconsistent body that trips an unchecked index) must not take
+			// down the whole process — only this one provider's result is lost.
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("metadata provider panicked", "provider", name, "panic", r)
+				}
+			}()
 			t, err := fn(ctx, artist, title)
 			if err != nil || t == nil {
 				return
@@ -187,11 +207,26 @@ func Resolve(ctx context.Context, artist, title string) (*itunes.Track, error) {
 		ArtworkURL:    artworkFinal,
 	}
 
-	if defaultCache != nil {
-		defaultCache.Set(key, out, cacheTTL)
+	if cache != nil {
+		cache.Set(key, out, cacheTTL)
 	}
 
-	return out, nil
+	// Return a copy distinct from the one just stored in the cache — the
+	// immediate (non-cache-hit) caller must not share a pointer with the
+	// cache entry either.
+	return cloneTrack(out), nil
+}
+
+// cloneTrack returns a shallow copy so a cache hit never hands out the same
+// pointer stored in the cache — a caller mutating the returned Track in place
+// would otherwise silently corrupt that entry for every other request sharing
+// the same artist|title key until it expires.
+func cloneTrack(t *itunes.Track) *itunes.Track {
+	if t == nil {
+		return nil
+	}
+	cp := *t
+	return &cp
 }
 
 func normalizeKey(s string) string {
@@ -209,16 +244,17 @@ func chooseMostCommon(ss []string) string {
 	for _, s := range ss {
 		counts[s]++
 	}
-	type kv struct {
-		k string
-		v int
-	}
-	var arr []kv
+	// Deterministic tiebreak (mirrors chooseMostCommonInt) — map iteration
+	// order is randomized, so without this, a genuine tie between providers
+	// could return a different winner on every call for identical input.
+	best, bestc := "", 0
 	for k, v := range counts {
-		arr = append(arr, kv{k, v})
+		if v > bestc || (v == bestc && k > best) {
+			best = k
+			bestc = v
+		}
 	}
-	sort.Slice(arr, func(i, j int) bool { return arr[i].v > arr[j].v })
-	return arr[0].k
+	return best
 }
 
 func chooseMostCommonInt(nums []int) int {

@@ -2,7 +2,7 @@ package deck
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -47,7 +47,12 @@ func ImportPlaylistHandler(w http.ResponseWriter, r *http.Request) {
 
 	videos, err := fetchPlaylistVideos(r.Context(), playlistID, maxCards)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errResp(err.Error()))
+		if errors.Is(err, youtube.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, errResp(err.Error()))
+			return
+		}
+		slog.Warn("import-playlist: all invidious instances failed", "playlistID", playlistID, "err", err)
+		writeJSON(w, http.StatusServiceUnavailable, errResp("could not fetch playlist right now, try again shortly"))
 		return
 	}
 	if len(videos) == 0 {
@@ -61,23 +66,31 @@ func ImportPlaylistHandler(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		cards = append(cards, validateResponse{
-			Valid:   true,
-			YtID:    v.VideoID,
-			Title:   v.Title,
-			Artist:  normalizeYTAuthor(v.Author),
+			Valid:  true,
+			YtID:   v.VideoID,
+			Title:  v.Title,
+			Artist: normalizeYTAuthor(v.Author),
 		})
 	}
 
 	// Enrich cards concurrently: year, artwork, cleaned title/artist via metadata providers.
+	// The semaphore is acquired before the goroutine is spawned (not inside it)
+	// so at most enrichConcurrency goroutines exist at a time instead of up to
+	// maxCards (300) all parked on the channel simultaneously.
 	const enrichConcurrency = 15
 	sem := make(chan struct{}, enrichConcurrency)
 	var wg sync.WaitGroup
 	for i := range cards {
+		sem <- struct{}{}
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			sem <- struct{}{}
 			defer func() { <-sem }()
+			defer func() {
+				if rec := recover(); rec != nil {
+					slog.Error("playlist enrich panicked", "card", i, "panic", rec)
+				}
+			}()
 
 			c := &cards[i]
 			searchTitle := normalizeYTTitle(c.Title)
@@ -192,35 +205,15 @@ func fetchPlaylistVideos(ctx context.Context, playlistID string, limit int) ([]i
 }
 
 func fetchPlaylistPage(ctx context.Context, playlistID string, page int) ([]invidiousPlaylistVideo, error) {
-	for _, inst := range youtube.Instances() {
-		reqURL := fmt.Sprintf("%s/api/v1/playlists/%s?page=%d&fields=videos", inst, url.PathEscape(playlistID), page)
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-		if err != nil {
-			continue
+	var pl invidiousPlaylist
+	err := youtube.FetchJSON(ctx, func(inst string) string {
+		return fmt.Sprintf("%s/api/v1/playlists/%s?page=%d&fields=videos", inst, url.PathEscape(playlistID), page)
+	}, &pl)
+	if err != nil {
+		if errors.Is(err, youtube.ErrNotFound) {
+			return nil, fmt.Errorf("playlist not found or is private: %w", err)
 		}
-		req.Header.Set("User-Agent", "musicguessr/1.0")
-		resp, err := invClient.Do(req)
-		if err != nil {
-			slog.Warn("invidious playlist page failed", "instance", inst, "page", page, "err", err)
-			continue
-		}
-		if resp.StatusCode == http.StatusNotFound {
-			_ = resp.Body.Close()
-			return nil, fmt.Errorf("playlist not found or is private")
-		}
-		if resp.StatusCode != http.StatusOK {
-			_ = resp.Body.Close()
-			slog.Warn("invidious playlist bad status", "instance", inst, "status", resp.StatusCode)
-			continue
-		}
-		var pl invidiousPlaylist
-		err = json.NewDecoder(resp.Body).Decode(&pl)
-		_ = resp.Body.Close()
-		if err != nil {
-			slog.Warn("invidious playlist decode failed", "instance", inst, "err", err)
-			continue
-		}
-		return pl.Videos, nil
+		return nil, fmt.Errorf("all invidious instances failed for playlist %s: %w", playlistID, err)
 	}
-	return nil, fmt.Errorf("all invidious instances failed for playlist %s", playlistID)
+	return pl.Videos, nil
 }
