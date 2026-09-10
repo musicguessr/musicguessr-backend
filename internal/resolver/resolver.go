@@ -48,6 +48,16 @@ func parseHitsterURL(rawURL string) (deckID, cardID string, err error) {
 	if perr != nil {
 		return "", "", fmt.Errorf("not a valid Hitster URL")
 	}
+	if u.Host == "" {
+		// Physical Hitster cards' QR codes encode scheme-less URLs
+		// ("www.hitstergame.com/pl/AB1/42") — without a scheme, url.Parse
+		// treats the whole string as a relative path (Host stays empty), so
+		// retry as if https:// were given before falling through to the
+		// same host validation as a proper absolute URL.
+		if u2, perr2 := url.Parse("https://" + rawURL); perr2 == nil {
+			u = u2
+		}
+	}
 	host := strings.ToLower(u.Host)
 	if h, _, ok := strings.Cut(host, ":"); ok {
 		host = h

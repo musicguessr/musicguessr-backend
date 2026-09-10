@@ -68,6 +68,25 @@ func TestResolve(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			// Real Hitster card QR codes encode scheme-less URLs — this was a
+			// live regression from the spoofed-host fix below: url.Parse on a
+			// scheme-less string leaves Host empty, so real scans were being
+			// rejected as "not a valid Hitster URL".
+			name: "scheme-less URL as scanned from a real card QR code",
+			url:  "www.hitstergame.com/pl/TESTDECK/42",
+			want: "spotify_track_abc",
+		},
+		{
+			name: "scheme-less URL without www",
+			url:  "hitstergame.com/en/TESTDECK/1",
+			want: "spotify_track_xyz",
+		},
+		{
+			name:    "scheme-less spoofed host is still rejected",
+			url:     "evilhitstergame.com/en/TESTDECK/42",
+			wantErr: true,
+		},
+		{
 			name:    "spoofed host with hitstergame.com as substring",
 			url:     "https://evilhitstergame.com/en/TESTDECK/42",
 			wantErr: true,
