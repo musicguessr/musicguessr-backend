@@ -134,9 +134,30 @@ func Resolve(ctx context.Context, artist, title string) (*itunes.Track, error) {
 		close(ch)
 	}()
 
+	// Stop as soon as a majority has answered rather than always waiting for
+	// every provider (i.e. until ch closes) — chooseMostCommon* only need a
+	// majority to produce a confident vote, but without this, one
+	// consistently slow or erroring provider (a free third-party API with no
+	// SLA) silently taxes every single request up to the full per-provider
+	// timeout, even when the other providers already agree. ch is buffered
+	// to len(providers), so a provider goroutine that answers after we stop
+	// reading never blocks — it just sends into the buffer and exits.
+	quorum := len(providers)/2 + 1
 	results := make([]pres, 0, len(providers))
-	for r := range ch {
-		results = append(results, r)
+collect:
+	for {
+		select {
+		case r, ok := <-ch:
+			if !ok {
+				break collect
+			}
+			results = append(results, r)
+			if len(results) >= quorum {
+				break collect
+			}
+		case <-ctx.Done():
+			break collect
+		}
 	}
 
 	if len(results) == 0 {

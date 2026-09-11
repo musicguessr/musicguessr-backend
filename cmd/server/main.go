@@ -226,10 +226,30 @@ func main() {
 		// Enrich: Spotify oEmbed → artist/title
 		artist, title := fetchSpotifyMeta(r.Context(), httpClient, spotifyID)
 		if artist != "" {
-			// ytArtist/ytTitle start as Spotify values; iTunes may overwrite with cleaner metadata.
-			ytArtist, ytTitle := artist, title
+			// The yt-dlp search and the metadata provider fan-out are
+			// independent — both only need Spotify's artist/title, neither
+			// depends on the other's result — so they used to run one after
+			// the other for no reason, making a cold (uncached) card's total
+			// wait the *sum* of both (metadata: up to 6s; yt-dlp: up to 20s).
+			// Running them concurrently caps it at whichever is slower
+			// instead, which is the actual bottleneck users were hitting on
+			// first-time scans. youtube.SearchVideoID always searches with
+			// Spotify's raw artist/title now (previously upgraded to
+			// metadata's cleaned title when available) — its own coreTitle/
+			// normalizeForQuery already strip the kind of noise
+			// ("(Radio Edit)", parenthetical suffixes, diacritics) that
+			// metadata's cleanup mainly helped with, so this isn't expected
+			// to cost meaningful match quality.
+			allowVariants := r.URL.Query().Get("yt_variants") == "1"
+			var wg sync.WaitGroup
+			var ytVideoID string
+			var ytErr error
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				ytVideoID, ytErr = youtube.SearchVideoID(r.Context(), artist, title, allowVariants)
+			}()
 
-			// Try metadata provider chain (parallel providers)
 			if track, err := metadata.Resolve(r.Context(), artist, title); err == nil {
 				resp.Artist = track.Artist
 				resp.Title = track.Title
@@ -241,7 +261,6 @@ func main() {
 				if track.AppleMusicURL != "" {
 					resp.Links["apple_music"] = track.AppleMusicURL
 				}
-				ytArtist, ytTitle = track.Artist, track.Title
 			} else {
 				slog.Warn("metadata resolve failed", "artist", artist, "title", title, "err", err)
 				resp.Artist = artist
@@ -249,12 +268,11 @@ func main() {
 				resp.Links = resolver.StreamingLinks(artist, title)
 			}
 
-			// YouTube video ID via Invidious — always attempt, even when iTunes fails.
-			allowVariants := r.URL.Query().Get("yt_variants") == "1"
-			if videoID, err := youtube.SearchVideoID(r.Context(), ytArtist, ytTitle, allowVariants); err == nil {
-				resp.YouTubeVideoID = videoID
+			wg.Wait()
+			if ytErr == nil {
+				resp.YouTubeVideoID = ytVideoID
 			} else {
-				slog.Warn("youtube search failed", "artist", ytArtist, "title", ytTitle, "err", err)
+				slog.Warn("youtube search failed", "artist", artist, "title", title, "err", ytErr)
 			}
 		}
 		resp.Links["spotify"] = resp.SpotifyURL
