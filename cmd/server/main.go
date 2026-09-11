@@ -202,9 +202,11 @@ func main() {
 			return
 		}
 
-		// Spotify fetch (8s) + metadata.Resolve (6s) + up to 2 sequential
-		// Invidious instances (6s each) can otherwise sum to ~26s with nothing
-		// bounding the request as a whole.
+		// Spotify fetch (8s) + metadata.Resolve (6s) + youtube.SearchVideoID
+		// (up to two sequential yt-dlp passes, 20s each when uncapped) can
+		// otherwise sum to nearly a minute with nothing bounding the request
+		// as a whole; this deadline caps the total regardless, at the cost of
+		// truncating whichever stage is still running when it fires.
 		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 		defer cancel()
 		r = r.WithContext(ctx)

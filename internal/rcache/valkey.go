@@ -63,6 +63,14 @@ func (c *valkeyClient) getConn(ctx context.Context) (*valkeyConn, error) {
 	}
 	vc := &valkeyConn{nc: nc, br: bufio.NewReader(nc)}
 
+	// A connection that completes the TCP handshake but then never answers
+	// AUTH/SELECT (overloaded server, half-open network path, etc.) would
+	// otherwise block this goroutine on an un-deadlined socket read forever
+	// — DialContext only bounds the dial itself. Reuse the same cmdTimeout/
+	// ctx-deadline policy Get/Set apply to the actual command.
+	done := c.withDeadline(ctx, vc)
+	defer done()
+
 	if c.password != "" {
 		if _, err := c.exec(vc, "AUTH", c.password); err != nil {
 			_ = nc.Close()

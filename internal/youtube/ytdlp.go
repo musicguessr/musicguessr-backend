@@ -69,6 +69,13 @@ func runYtDlp(ctx context.Context, timeout time.Duration, args ...string) ([]byt
 
 	fullArgs := append([]string{"-m", "yt_dlp", "--no-warnings", "--ignore-config", "--skip-download", "--dump-json"}, args...)
 	cmd := exec.CommandContext(ctx, ytPythonBin, fullArgs...)
+	// exec.CommandContext's default Cancel (Process.Kill) only guarantees the
+	// process is signaled when ctx is done — if a grandchild process yt-dlp
+	// spawns keeps the stdout/stderr pipes open after the kill, cmd.Wait (and
+	// therefore cmd.Run, and therefore this whole call) can still block past
+	// the context deadline. WaitDelay bounds that: once Cancel has fired and
+	// WaitDelay elapses, Go forcibly closes the I/O pipes so Wait returns.
+	cmd.WaitDelay = 5 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
