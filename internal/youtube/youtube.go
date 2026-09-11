@@ -4,31 +4,10 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
-	"net/url"
-	"os"
 	"strings"
-	"time"
 )
-
-// UserAgent is sent on every outbound request to Invidious instances — a
-// single source of truth so it can't drift between call sites.
-const UserAgent = "musicguessr/1.0 (+https://github.com/musicguessr)"
-
-// ErrNotFound is returned by FetchJSON when an Invidious instance gives a
-// confirmed 404 for the requested resource — a definitive negative that
-// should stop the failover loop immediately, distinct from every instance
-// being unreachable/erroring (ErrAllInstancesFailed).
-var ErrNotFound = errors.New("youtube: resource not found")
-
-// ErrAllInstancesFailed is returned by FetchJSON when every configured
-// Invidious instance failed for reasons other than a confirmed 404
-// (network error, non-200/404 status, bad JSON) — an infrastructure
-// problem, not evidence the requested resource doesn't exist.
-var ErrAllInstancesFailed = errors.New("youtube: all invidious instances failed")
 
 //go:embed filters.json
 var filtersJSON []byte
@@ -39,167 +18,48 @@ type filtersFile struct {
 	OfficialMarkers  []string `json:"official_markers"`
 }
 
-var defaultInstances = []string{
-	"https://iv.melmac.space",
-	"https://invidious.darkness.services",
-}
-
-var client = &http.Client{
-	Timeout: 6 * time.Second,
-	Transport: &http.Transport{
-		MaxIdleConns:        50,
-		MaxIdleConnsPerHost: 10,
-		IdleConnTimeout:     30 * time.Second,
-	},
-}
-
-// Instances returns the list of Invidious instances to use, from INVIDIOUS_INSTANCES env var or defaults.
-func Instances() []string {
-	env := os.Getenv("INVIDIOUS_INSTANCES")
-	if env == "" {
-		return defaultInstances
-	}
-	parts := strings.Split(env, ",")
-	var out []string
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			out = append(out, p)
-		}
-	}
-	// A set env var that reduces to zero usable entries after trim/split
-	// (a blank string, a comma-only value) is almost certainly a deploy
-	// misconfiguration, not an intentional "use no instances" — fall back to
-	// the defaults rather than making every YouTube-dependent endpoint fail
-	// uniformly with no signal pointing at the actual cause.
-	if len(out) == 0 {
-		slog.Warn("INVIDIOUS_INSTANCES set but yielded no usable entries, falling back to defaults", "raw", env)
-		return defaultInstances
-	}
-	return out
-}
-
-// FetchJSON tries each configured Invidious instance in turn — buildURL(instance)
-// builds the request URL for that instance — decoding the first 200 response's
-// JSON body into out. A confirmed 404 from any instance stops the loop
-// immediately and returns ErrNotFound (trying other instances wouldn't turn a
-// real "not found" into a "found"); any other per-instance failure (network
-// error, non-200 status, bad JSON) is logged and the next instance is tried.
-// If every instance fails that way, ErrAllInstancesFailed is returned.
-func FetchJSON(ctx context.Context, buildURL func(instance string) string, out any) error {
-	instances := Instances()
-	for _, inst := range instances {
-		reqURL := buildURL(inst)
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-		if err != nil {
-			slog.Warn("invidious request build failed", "instance", inst, "err", err)
-			continue
-		}
-		req.Header.Set("User-Agent", UserAgent)
-		req.Header.Set("Accept", "application/json")
-		resp, err := client.Do(req)
-		if err != nil {
-			slog.Warn("invidious instance request failed", "instance", inst, "err", err)
-			continue
-		}
-		if resp.StatusCode == http.StatusNotFound {
-			_ = resp.Body.Close()
-			return ErrNotFound
-		}
-		if resp.StatusCode != http.StatusOK {
-			slog.Warn("invidious instance bad status", "instance", inst, "status", resp.StatusCode)
-			_ = resp.Body.Close()
-			continue
-		}
-		err = json.NewDecoder(resp.Body).Decode(out)
-		_ = resp.Body.Close()
-		if err != nil {
-			slog.Warn("invidious instance decode failed", "instance", inst, "err", err)
-			continue
-		}
-		return nil
-	}
-	return ErrAllInstancesFailed
-}
-
-type invidiousItem struct {
-	Type    string `json:"type"`
-	VideoID string `json:"videoId"`
-	Title   string `json:"title"`
-}
-
-// SearchVideoID finds the best YouTube video ID for a track.
-// If allowVariants is true and no original is found, a second pass is attempted
-// that accepts remixes, acoustic versions, and other alt versions as a fallback.
+// SearchVideoID finds the best YouTube video ID for a track via a yt-dlp
+// search. If allowVariants is true and no original is found, a second pass
+// is attempted that accepts remixes, acoustic versions, and other alt
+// versions as a fallback.
 func SearchVideoID(ctx context.Context, artist, title string, allowVariants bool) (string, error) {
 	// Use ASCII-normalized coreTitle for the query:
-	// - removes diacritics so Polish/French/German chars don't confuse Invidious instances
+	// - removes diacritics so Polish/French/German chars don't confuse the search
 	// - strips parenthetical version info ("(Radio edit)", "(feat. X)") for better recall
 	// - removes commas and brackets that can break query parsing
-	q := url.QueryEscape(normalizeForQuery(artist) + " " + normalizeForQuery(coreTitle(title)))
+	q := normalizeForQuery(artist) + " " + normalizeForQuery(coreTitle(title))
 	slog.Info("youtube search start", "artist", artist, "title", title, "allowVariants", allowVariants)
-	for _, inst := range Instances() {
-		id, score, variant, err := tryInstance(ctx, inst, q, artist, title, allowVariants)
-		if err != nil {
-			slog.Warn("invidious instance failed", "instance", inst, "err", err)
-			continue
-		}
-		if variant {
-			slog.Info("youtube matched variant fallback", "instance", inst, "videoId", id, "score", score)
-		} else {
-			slog.Info("youtube search success", "instance", inst, "videoId", id, "score", score)
-		}
-		return id, nil
-	}
-	return "", fmt.Errorf("no confident match found for %q – %q", artist, title)
-}
 
-func tryInstance(ctx context.Context, instance, query, artist, title string, allowVariants bool) (string, int, bool, error) {
-	reqURL := instance + "/api/v1/search?q=" + query + "&type=video&fields=videoId,title,type"
-	slog.Debug("invidious request", "url", reqURL)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	items, err := ytSearch(ctx, q, 8)
 	if err != nil {
-		return "", 0, false, err
+		return "", fmt.Errorf("yt-dlp search failed for %q – %q: %w", artist, title, err)
 	}
-	req.Header.Set("User-Agent", UserAgent)
-	req.Header.Set("Accept", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", 0, false, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		return "", 0, false, fmt.Errorf("status %d", resp.StatusCode)
-	}
-	var items []invidiousItem
-	if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
-		return "", 0, false, err
+	for i, item := range items {
+		slog.Debug("yt-dlp search result", "index", i, "videoId", item.VideoID, "title", item.Title, "score", scoreMatch(item.Title, artist, title, false))
 	}
 
 	// Pass 1: strict — original only, no remixes/variants
 	id, score := bestMatch(items, artist, title, false)
-	for i, item := range items {
-		slog.Debug("invidious item", "index", i, "videoId", item.VideoID, "title", item.Title, "score", scoreMatch(item.Title, artist, title, false))
-	}
 	if score >= 7 {
-		return id, score, false, nil
+		slog.Info("youtube search success", "videoId", id, "score", score)
+		return id, nil
 	}
 
 	// Pass 2: relaxed — allow remixes/alt versions as fallback
 	if allowVariants {
 		id, score = bestMatch(items, artist, title, true)
 		if score >= 7 {
-			slog.Debug("youtube variant fallback pass", "videoId", id, "score", score)
-			return id, score, true, nil
+			slog.Info("youtube matched variant fallback", "videoId", id, "score", score)
+			return id, nil
 		}
 	}
 
-	return "", score, false, fmt.Errorf("no confident match (best score %d) for %q – %q", score, artist, title)
+	return "", fmt.Errorf("no confident match found for %q – %q", artist, title)
 }
 
 // bestMatch returns the video with the highest confidence score.
 // relaxed=true skips variant disqualification (remix, acoustic, etc.) for fallback matching.
-func bestMatch(items []invidiousItem, artist, title string, relaxed bool) (string, int) {
+func bestMatch(items []ytSearchItem, artist, title string, relaxed bool) (string, int) {
 	bestID := ""
 	bestScore := 0
 	for _, item := range items {

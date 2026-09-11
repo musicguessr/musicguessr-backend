@@ -1,7 +1,6 @@
 package deck
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -42,17 +41,17 @@ func ValidateYtHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	title, artist, err := fetchInvidiousVideoMeta(r.Context(), ytID)
+	title, artist, err := youtube.FetchVideoMeta(r.Context(), ytID)
 	if err != nil {
 		if errors.Is(err, youtube.ErrNotFound) {
 			writeJSON(w, http.StatusNotFound, validateResponse{Valid: false, Error: "video not found or unavailable"})
 			return
 		}
-		// Every instance failed for infrastructure reasons (network/5xx/bad
-		// JSON) — this is not evidence the video/URL itself is invalid, so it
-		// must not be reported as 404 "not found" (misleads the user into
-		// thinking their valid link is bad).
-		slog.Warn("validate-yt: all invidious instances failed", "ytID", ytID, "err", err)
+		// A yt-dlp failure that isn't a confirmed not-found (network error,
+		// crash, bad output) is not evidence the video/URL itself is invalid,
+		// so it must not be reported as 404 "not found" (misleads the user
+		// into thinking their valid link is bad).
+		slog.Warn("validate-yt: yt-dlp lookup failed", "ytID", ytID, "err", err)
 		writeJSON(w, http.StatusServiceUnavailable, validateResponse{Valid: false, Error: "could not verify video right now, try again shortly"})
 		return
 	}
@@ -83,22 +82,6 @@ func ValidateYtHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, resp)
-}
-
-type invidiousVideoMeta struct {
-	Title  string `json:"title"`
-	Author string `json:"author"`
-}
-
-func fetchInvidiousVideoMeta(ctx context.Context, ytID string) (title, artist string, err error) {
-	var meta invidiousVideoMeta
-	err = youtube.FetchJSON(ctx, func(inst string) string {
-		return inst + "/api/v1/videos/" + ytID + "?fields=title,author"
-	}, &meta)
-	if err != nil {
-		return "", "", err
-	}
-	return meta.Title, meta.Author, nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

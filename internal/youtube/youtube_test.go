@@ -155,37 +155,3 @@ func TestScoreMatch_TitleCoverage(t *testing.T) {
 		t.Errorf("expected score < 7 for unrelated video, got %d", zero)
 	}
 }
-
-func TestInstances_Default(t *testing.T) {
-	t.Setenv("INVIDIOUS_INSTANCES", "")
-	got := Instances()
-	if len(got) == 0 {
-		t.Error("expected default instances when env var is empty")
-	}
-}
-
-func TestInstances_BlankAfterTrimFallsBackToDefaults(t *testing.T) {
-	for _, env := range []string{" ", ",", " , ,"} {
-		t.Run(env, func(t *testing.T) {
-			t.Setenv("INVIDIOUS_INSTANCES", env)
-			got := Instances()
-			if len(got) == 0 {
-				t.Errorf("expected fallback to default instances for INVIDIOUS_INSTANCES=%q, got none", env)
-			}
-		})
-	}
-}
-
-func TestInstances_FromEnv(t *testing.T) {
-	t.Setenv("INVIDIOUS_INSTANCES", "https://a.example.com, https://b.example.com")
-	got := Instances()
-	if len(got) != 2 {
-		t.Fatalf("expected 2 instances, got %d: %v", len(got), got)
-	}
-	if got[0] != "https://a.example.com" {
-		t.Errorf("got[0] = %q, want %q", got[0], "https://a.example.com")
-	}
-	if got[1] != "https://b.example.com" {
-		t.Errorf("got[1] = %q, want %q", got[1], "https://b.example.com")
-	}
-}

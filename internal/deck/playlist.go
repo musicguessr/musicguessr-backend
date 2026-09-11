@@ -45,13 +45,13 @@ func ImportPlaylistHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	videos, err := fetchPlaylistVideos(r.Context(), playlistID, maxCards)
+	videos, err := youtube.FetchPlaylist(r.Context(), playlistID, maxCards)
 	if err != nil {
 		if errors.Is(err, youtube.ErrNotFound) {
-			writeJSON(w, http.StatusNotFound, errResp(err.Error()))
+			writeJSON(w, http.StatusNotFound, errResp("playlist not found or is private"))
 			return
 		}
-		slog.Warn("import-playlist: all invidious instances failed", "playlistID", playlistID, "err", err)
+		slog.Warn("import-playlist: yt-dlp fetch failed", "playlistID", playlistID, "err", err)
 		writeJSON(w, http.StatusServiceUnavailable, errResp("could not fetch playlist right now, try again shortly"))
 		return
 	}
@@ -165,55 +165,3 @@ func looksLikePlaylistID(s string) bool {
 	return false
 }
 
-type invidiousPlaylistVideo struct {
-	VideoID string `json:"videoId"`
-	Title   string `json:"title"`
-	Author  string `json:"author"`
-}
-
-type invidiousPlaylist struct {
-	Videos []invidiousPlaylistVideo `json:"videos"`
-}
-
-const maxPlaylistPages = 10
-
-func fetchPlaylistVideos(ctx context.Context, playlistID string, limit int) ([]invidiousPlaylistVideo, error) {
-	var all []invidiousPlaylistVideo
-	for page := 1; page <= maxPlaylistPages && len(all) < limit; page++ {
-		batch, err := fetchPlaylistPage(ctx, playlistID, page)
-		if err != nil {
-			if len(all) > 0 {
-				// Partial results from previous pages are usable.
-				break
-			}
-			return nil, err
-		}
-		if len(batch) == 0 {
-			break
-		}
-		remaining := limit - len(all)
-		if len(batch) > remaining {
-			batch = batch[:remaining]
-		}
-		all = append(all, batch...)
-		// Invidious returns ≤100 videos per page; fewer means we're on the last page.
-		if len(batch) < 100 {
-			break
-		}
-	}
-	return all, nil
-}
-
-func fetchPlaylistPage(ctx context.Context, playlistID string, page int) ([]invidiousPlaylistVideo, error) {
-	var pl invidiousPlaylist
-	err := youtube.FetchJSON(ctx, func(inst string) string {
-		return fmt.Sprintf("%s/api/v1/playlists/%s?page=%d&fields=videos", inst, url.PathEscape(playlistID), page)
-	}, &pl)
-	if err != nil {
-		if errors.Is(err, youtube.ErrNotFound) {
-			return nil, fmt.Errorf("playlist not found or is private: %w", err)
-		}
-		return nil, fmt.Errorf("all invidious instances failed for playlist %s: %w", playlistID, err)
-	}
-	return pl.Videos, nil
-}
