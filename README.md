@@ -65,6 +65,15 @@ Caches both the metadata-provider result and the yt-dlp YouTube search result, k
 |----------|---------|-------------|
 | `DISCOGS_TOKEN` | _(unset)_ | Discogs API personal access token. If unset, the Discogs provider is skipped. Get one at [discogs.com/settings/developers](https://www.discogs.com/settings/developers). |
 | `THEAUDIODB_KEY` | `1` (public) | TheAudioDB API key. The default public key `1` works but is rate-limited. |
+| `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` | _(unset — disabled)_ | Client Credentials Flow (app-only, no user auth) for a dedicated Spotify app — see [developer.spotify.com](https://developer.spotify.com/dashboard) ("Web API" only under "Which API/SDKs are you planning to use?"; the Redirect URI field is required by the form but unused by this flow). When set, `/api/resolve` fetches the exact track ID's own Spotify catalog data and prefers it over the fanout below — see "Metadata accuracy" below for why this matters. A circuit breaker makes stale/rotated credentials fail safe (falls back to the fanout) rather than breaking requests. |
+
+### Metadata accuracy & known limitations
+
+`/api/resolve` identifies a card's exact Spotify track ID from the QR code, then looks up its title/artist/year/artwork across the providers above (plus Spotify's own catalog, when configured) and combines the answers by majority vote.
+
+For most tracks this works reliably. For **older or less common recordings — TV and film themes especially** — public music databases very often only have a *re-recording* or cover version indexed, not the original: re-recording a theme is usually cheaper to license than clearing the original master. When that's what these providers have, that's what gets shown — sometimes with the wrong year or artist for what's printed on the physical card. We've shipped targeted fixes for this (an earlier-dated, artist-matching iTunes candidate is preferred over the API's raw top match; a tie between providers on the year now favors the older value, since a re-recording is always dated later than the original, never earlier; the direct Spotify catalog lookup above is authoritative for the exact track when available), but this remains fundamentally bounded by what these third-party catalogs have indexed — we can reduce it, not promise it away for every card.
+
+We're sorry when this happens — it can throw off an actual round of the game, and we know that's frustrating. If you spot a card with a wrong year, artist, or track, an issue on this repo with the card's title/deck (or a photo, like the one that led to the fixes above) genuinely helps us investigate.
 
 ### Custom decks — deck storage
 
