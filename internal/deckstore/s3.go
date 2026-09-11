@@ -26,20 +26,20 @@ type s3Store struct {
 
 func newS3(cfg s3Config) (*s3Store, error) {
 	if cfg.endpoint == "" {
-		return nil, fmt.Errorf("deckstore/s3: DECK_STORAGE_ENDPOINT is required")
+		return nil, fmt.Errorf("deckstore/s3: *_ENDPOINT is required")
 	}
 	if cfg.bucket == "" {
-		return nil, fmt.Errorf("deckstore/s3: DECK_STORAGE_BUCKET is required")
+		return nil, fmt.Errorf("deckstore/s3: *_BUCKET is required")
 	}
 	if cfg.accessKey == "" || cfg.secretKey == "" {
-		return nil, fmt.Errorf("deckstore/s3: DECK_STORAGE_ACCESS_KEY_ID and DECK_STORAGE_SECRET_ACCESS_KEY are required")
+		return nil, fmt.Errorf("deckstore/s3: *_ACCESS_KEY_ID and *_SECRET_ACCESS_KEY are required")
 	}
 	if cfg.region == "" {
 		// "auto" is meaningful for Cloudflare R2 but not for real AWS S3 or
 		// other S3-compatible providers — log it so a deployer pointing at a
 		// provider that needs a real region sees why every request suddenly
 		// fails signature verification, instead of silently getting "auto".
-		slog.Warn("DECK_STORAGE_REGION not set, defaulting to \"auto\" (correct for Cloudflare R2; set explicitly for AWS S3 or other providers)")
+		slog.Warn("*_REGION not set, defaulting to \"auto\" (correct for Cloudflare R2; set explicitly for AWS S3 or other providers)")
 		cfg.region = "auto"
 	}
 	return &s3Store{

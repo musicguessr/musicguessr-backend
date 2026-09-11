@@ -17,10 +17,47 @@ import (
 
 	"github.com/musicguessr/musicguessr-backend/internal/deck"
 	"github.com/musicguessr/musicguessr-backend/internal/deckstore"
+	"github.com/musicguessr/musicguessr-backend/internal/itunes"
 	"github.com/musicguessr/musicguessr-backend/internal/metadata"
+	"github.com/musicguessr/musicguessr-backend/internal/rcache"
 	"github.com/musicguessr/musicguessr-backend/internal/resolver"
 	"github.com/musicguessr/musicguessr-backend/internal/youtube"
 )
+
+// metadataCacheAdapter implements metadata.Cache on top of the persistent,
+// two-tier rcache.Cache (Valkey + S3) — see internal/rcache. The per-call ttl
+// metadata.Cache.Set receives is intentionally ignored: rcache's own
+// RESOLVE_CACHE_TTL_SECONDS is the single source of truth for how long the
+// Valkey tier holds an entry, so every cached lookup in the app shares one
+// policy instead of each package's default TTL silently taking effect here.
+type metadataCacheAdapter struct{ c *rcache.Cache }
+
+func (a metadataCacheAdapter) Get(key string) (*itunes.Track, bool) {
+	var t itunes.Track
+	if a.c.GetJSON(context.Background(), "metadata", key, &t) {
+		return &t, true
+	}
+	return nil, false
+}
+
+func (a metadataCacheAdapter) Set(key string, t *itunes.Track, _ time.Duration) {
+	a.c.SetJSON(context.Background(), "metadata", key, t)
+}
+
+// youtubeCacheAdapter implements youtube.Cache the same way.
+type youtubeCacheAdapter struct{ c *rcache.Cache }
+
+func (a youtubeCacheAdapter) Get(key string) (string, bool) {
+	var videoID string
+	if a.c.GetJSON(context.Background(), "youtube", key, &videoID) {
+		return videoID, true
+	}
+	return "", false
+}
+
+func (a youtubeCacheAdapter) Set(key, videoID string) {
+	a.c.SetJSON(context.Background(), "youtube", key, videoID)
+}
 
 // sharedTransport is reused by all HTTP clients for connection pooling.
 var sharedTransport = &http.Transport{
@@ -123,6 +160,21 @@ func main() {
 		os.Exit(1)
 	}
 	deckHandler := deck.NewHandler(store)
+
+	// Persistent resolve cache (Valkey hot tier + S3 permanent tier, both
+	// optional — see internal/rcache) so repeat scans of the same card skip
+	// the metadata-provider fan-out and the yt-dlp search entirely instead of
+	// only benefiting from the in-process, restart-losing caches those
+	// packages default to.
+	resolveCache, err := rcache.New()
+	if err != nil {
+		slog.Error("rcache init failed", "err", err)
+		os.Exit(1)
+	}
+	if resolveCache.Enabled() {
+		metadata.SetCache(metadataCacheAdapter{c: resolveCache})
+		youtube.SetCache(youtubeCacheAdapter{c: resolveCache})
+	}
 
 	mux := http.NewServeMux()
 

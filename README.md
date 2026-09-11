@@ -9,10 +9,11 @@ Stateless Go HTTP backend for the MusicGuessr application. Resolves Hitster QR c
 | `cmd/server/` | HTTP server, CORS, route registration |
 | `internal/resolver/` | Loads Hitster game DB from Azure Blob, resolves QR → Spotify track ID |
 | `internal/itunes/` | iTunes Search API — title, artist, year, artwork, Apple Music URL |
-| `internal/youtube/` | Invidious API proxy — finds YouTube video ID, result scoring |
+| `internal/youtube/` | Finds a YouTube video ID via yt-dlp, result scoring |
 | `internal/metadata/` | Parallel metadata provider chain (iTunes, MusicBrainz, Deezer, Discogs, TheAudioDB) |
 | `internal/deck/` | Custom deck create/get handlers + per-card YouTube URL validation |
 | `internal/deckstore/` | DeckStore interface — `local`, `s3`, `memory` implementations |
+| `internal/rcache/` | Persistent two-tier cache (Valkey hot tier + S3 permanent tier) for YouTube/metadata lookups |
 
 ## Prerequisites
 
@@ -35,17 +36,28 @@ go run ./cmd/server
 | `PORT` | `8080` | TCP port the HTTP server listens on |
 | `LOG_LEVEL` | _(unset)_ | Set to `debug` to enable verbose structured logging |
 
-### YouTube / Invidious
+### YouTube
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `INVIDIOUS_INSTANCES` | `https://iv.melmac.space,https://invidious.darkness.services` | Comma-separated list of Invidious instances used for YouTube search and video metadata lookups. Instances are tried in order; first successful response wins. |
+YouTube search/metadata/playlist lookups shell out to `yt-dlp` (see `internal/youtube/ytdlp.go`) — no configuration required, but the `python3.13` interpreter and the `yt-dlp` package (installed via `PYTHONPATH`, see the Dockerfile) must be present on `PATH`.
 
 ### Metadata cache
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `METADATA_CACHE_TTL_SECONDS` | `86400` (24 h) | TTL for the in-memory track metadata cache. Reduce to pick up metadata changes sooner; increase to lower external API traffic. |
+| `METADATA_CACHE_TTL_SECONDS` | `86400` (24 h) | TTL for the in-memory track metadata cache (used only when the persistent cache below isn't configured — see `RESOLVE_CACHE_TTL_SECONDS`). Reduce to pick up metadata changes sooner; increase to lower external API traffic. |
+
+### Persistent resolve cache (`internal/rcache`)
+
+Caches both the metadata-provider result and the yt-dlp YouTube search result, keyed by (normalized) artist/title, so scanning the same Hitster card twice doesn't repeat either lookup. Two independent, optional tiers — either or both may be configured; with neither set, the app falls back to the in-process, restart-losing caches each package already has on its own.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `VALKEY_ADDR` | _(unset — tier disabled)_ | `host:port` of a Valkey/Redis server. Fast "hot" tier, entries expire after `RESOLVE_CACHE_TTL_SECONDS`. |
+| `VALKEY_PASSWORD` | _(unset)_ | Password for `AUTH`, if the server requires one. |
+| `VALKEY_DB` | `0` | Logical DB index (`SELECT`). |
+| `RESOLVE_CACHE_TTL_SECONDS` | `2592000` (30 days) | TTL applied to entries written to the Valkey tier. |
+| `RESOLVE_CACHE_PROVIDER` | _(unset — tier disabled)_ | `s3` (or `local`/`memory`) — same shape as `DECK_STORAGE_PROVIDER` below, see `deckstore.NewWithPrefix`. Permanent tier, no expiry; safe to point at the same bucket as `DECK_STORAGE_*` (cache keys are hashed and namespaced, so they can't collide with deck IDs). |
+| `RESOLVE_CACHE_ENDPOINT` / `_BUCKET` / `_ACCESS_KEY_ID` / `_SECRET_ACCESS_KEY` / `_REGION` | _(required for s3)_ | Same meaning as the `DECK_STORAGE_*` equivalents below. |
 
 ### Optional metadata providers
 

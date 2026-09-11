@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 )
 
 //go:embed filters.json
@@ -18,11 +19,57 @@ type filtersFile struct {
 	OfficialMarkers  []string `json:"official_markers"`
 }
 
+// Cache allows plugging in a persistent store (see internal/rcache) so a
+// video ID found for a given artist/title doesn't require a fresh yt-dlp
+// subprocess + network search every time the same card is scanned again.
+// Unset (nil) by default — SearchVideoID then behaves exactly as before.
+type Cache interface {
+	Get(key string) (videoID string, ok bool)
+	Set(key, videoID string)
+}
+
+var (
+	cacheMu sync.RWMutex
+	cache   Cache
+)
+
+// SetCache installs a persistent cache for SearchVideoID results.
+func SetCache(c Cache) {
+	cacheMu.Lock()
+	cache = c
+	cacheMu.Unlock()
+}
+
+func getCache() Cache {
+	cacheMu.RLock()
+	defer cacheMu.RUnlock()
+	return cache
+}
+
+// searchCacheKey must include allowVariants: a strict-mode miss and a
+// variants-allowed hit for the same track are genuinely different results
+// (original vs. remix/live/etc.) and must not be served interchangeably.
+func searchCacheKey(artist, title string, allowVariants bool) string {
+	v := "0"
+	if allowVariants {
+		v = "1"
+	}
+	return normalize(artist) + "|" + normalize(title) + "|" + v
+}
+
 // SearchVideoID finds the best YouTube video ID for a track via a yt-dlp
 // search. If allowVariants is true and no original is found, a second pass
 // is attempted that accepts remixes, acoustic versions, and other alt
 // versions as a fallback.
 func SearchVideoID(ctx context.Context, artist, title string, allowVariants bool) (string, error) {
+	key := searchCacheKey(artist, title, allowVariants)
+	if c := getCache(); c != nil {
+		if videoID, ok := c.Get(key); ok {
+			slog.Debug("youtube search cache hit", "artist", artist, "title", title)
+			return videoID, nil
+		}
+	}
+
 	// Use ASCII-normalized coreTitle for the query:
 	// - removes diacritics so Polish/French/German chars don't confuse the search
 	// - strips parenthetical version info ("(Radio edit)", "(feat. X)") for better recall
@@ -42,6 +89,9 @@ func SearchVideoID(ctx context.Context, artist, title string, allowVariants bool
 	id, score := bestMatch(items, artist, title, false)
 	if score >= 7 {
 		slog.Info("youtube search success", "videoId", id, "score", score)
+		if c := getCache(); c != nil {
+			c.Set(key, id)
+		}
 		return id, nil
 	}
 
@@ -50,10 +100,17 @@ func SearchVideoID(ctx context.Context, artist, title string, allowVariants bool
 		id, score = bestMatch(items, artist, title, true)
 		if score >= 7 {
 			slog.Info("youtube matched variant fallback", "videoId", id, "score", score)
+			if c := getCache(); c != nil {
+				c.Set(key, id)
+			}
 			return id, nil
 		}
 	}
 
+	// A failed lookup is deliberately not cached — the correct upload may
+	// simply not exist on YouTube yet, or a scoring/query tweak later might
+	// find it; permanently caching a negative result would make that
+	// unrecoverable without a manual cache-bust.
 	return "", fmt.Errorf("no confident match found for %q – %q", artist, title)
 }
 

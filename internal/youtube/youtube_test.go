@@ -1,8 +1,60 @@
 package youtube
 
 import (
+	"context"
 	"testing"
 )
+
+type fakeCache struct {
+	m map[string]string
+}
+
+func newFakeCache() *fakeCache { return &fakeCache{m: map[string]string{}} }
+
+func (f *fakeCache) Get(key string) (string, bool) {
+	v, ok := f.m[key]
+	return v, ok
+}
+
+func (f *fakeCache) Set(key, videoID string) {
+	f.m[key] = videoID
+}
+
+func TestSearchVideoID_CacheHitSkipsSearch(t *testing.T) {
+	t.Cleanup(func() { SetCache(nil) })
+
+	fc := newFakeCache()
+	key := searchCacheKey("Daft Punk", "Get Lucky", false)
+	fc.m[key] = "cached-video-id"
+	SetCache(fc)
+
+	// If this reaches ytSearch (real yt-dlp subprocess), it will either hang
+	// on a missing interpreter or take real network time — the test's point
+	// is that a cache hit returns immediately without doing either.
+	id, err := SearchVideoID(context.Background(), "Daft Punk", "Get Lucky", false)
+	if err != nil {
+		t.Fatalf("expected cache hit, got error: %v", err)
+	}
+	if id != "cached-video-id" {
+		t.Errorf("got %q, want %q", id, "cached-video-id")
+	}
+}
+
+func TestSearchCacheKey_VariantsDontCollide(t *testing.T) {
+	strict := searchCacheKey("Queen", "Bohemian Rhapsody", false)
+	relaxed := searchCacheKey("Queen", "Bohemian Rhapsody", true)
+	if strict == relaxed {
+		t.Error("strict and variants-allowed cache keys must differ")
+	}
+}
+
+func TestSearchCacheKey_NormalizesCase(t *testing.T) {
+	a := searchCacheKey("Daft Punk", "Get Lucky", false)
+	b := searchCacheKey("DAFT PUNK", "get lucky", false)
+	if a != b {
+		t.Errorf("expected case-insensitive keys to match: %q != %q", a, b)
+	}
+}
 
 func TestCoreTitle(t *testing.T) {
 	tests := []struct {
