@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type localStore struct {
@@ -56,4 +57,32 @@ func (s *localStore) Get(_ context.Context, id string) ([]byte, error) {
 		return nil, ErrNotFound
 	}
 	return data, err
+}
+
+func (s *localStore) Delete(_ context.Context, id string) error {
+	err := os.Remove(filepath.Join(s.dir, id+".json"))
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("deckstore/local: remove %s: %w", id, err)
+	}
+	return nil
+}
+
+func (s *localStore) List(_ context.Context) ([]string, error) {
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return nil, fmt.Errorf("deckstore/local: read dir: %w", err)
+	}
+	ids := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		// Skip Put's temp files (id.*.tmp) — a crash mid-write can leave one
+		// behind, and it's not a complete/valid deck object.
+		name := e.Name()
+		if ext := filepath.Ext(name); ext == ".json" {
+			ids = append(ids, strings.TrimSuffix(name, ext))
+		}
+	}
+	return ids, nil
 }

@@ -10,6 +10,13 @@ import (
 type Store interface {
 	Put(ctx context.Context, id string, data []byte) error
 	Get(ctx context.Context, id string) ([]byte, error)
+	// Delete removes an object. Deleting an id that doesn't exist is not an
+	// error — callers (e.g. the expiry cleanup job) don't need to Get first.
+	Delete(ctx context.Context, id string) error
+	// List returns every object id currently stored. Used by the expiry
+	// cleanup job, which fetches each one to check ExpiresAt — expected to
+	// run infrequently against a hobby-scale deck count, not on a hot path.
+	List(ctx context.Context) ([]string, error)
 }
 
 func New() (Store, error) {

@@ -7,6 +7,7 @@ import (
 	"html"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -19,6 +20,7 @@ import (
 	"github.com/musicguessr/musicguessr-backend/internal/deckstore"
 	"github.com/musicguessr/musicguessr-backend/internal/itunes"
 	"github.com/musicguessr/musicguessr-backend/internal/metadata"
+	"github.com/musicguessr/musicguessr-backend/internal/ratelimit"
 	"github.com/musicguessr/musicguessr-backend/internal/rcache"
 	"github.com/musicguessr/musicguessr-backend/internal/resolver"
 	"github.com/musicguessr/musicguessr-backend/internal/youtube"
@@ -120,6 +122,42 @@ type errResponse struct {
 	Error string `json:"error"`
 }
 
+// clientIP extracts the caller's real address. Production always sits
+// behind Cloudflare Tunnel — cloudflared is the only thing that can reach
+// this container on musicguessr.network, so CF-Connecting-IP (set by
+// Cloudflare's edge, not forgeable by the end client) is trustworthy here.
+// X-Forwarded-For is a fallback for local/non-Cloudflare deployments; the
+// RemoteAddr fallback below covers direct connections (e.g. `go run` in dev).
+func clientIP(r *http.Request) string {
+	if ip := r.Header.Get("CF-Connecting-IP"); ip != "" {
+		return ip
+	}
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if ip := strings.TrimSpace(strings.Split(xff, ",")[0]); ip != "" {
+			return ip
+		}
+	}
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+// rateLimited wraps a handler with a per-IP token-bucket check. Applied
+// selectively to the expensive/abusable endpoints (metadata+yt-dlp fan-out,
+// deck creation/import) rather than globally — /health and static asset
+// serving elsewhere have no such cost to protect.
+func rateLimited(limiter *ratelimit.Limiter, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !limiter.Allow(clientIP(r)) {
+			w.Header().Set("Retry-After", "5")
+			writeJSON(w, http.StatusTooManyRequests, errResponse{"too many requests, please slow down"})
+			return
+		}
+		next(w, r)
+	}
+}
+
 func cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -176,12 +214,30 @@ func main() {
 		youtube.SetCache(youtubeCacheAdapter{c: resolveCache})
 	}
 
+	// Both endpoints groups are public with no auth, so they're the surface
+	// most exposed to abuse (scripted scraping, or someone hammering the
+	// yt-dlp subprocess path). Limits are per-IP and generous enough for
+	// normal gameplay/deck creation, not for scripted load. Deck creation is
+	// stricter since it fans out metadata enrichment across up to 300 cards
+	// per call.
+	resolveLimiter := ratelimit.New(0.5, 15, 10*time.Minute) // ~30/min sustained, burst 15
+	deckLimiter := ratelimit.New(0.1, 3, 10*time.Minute)     // ~6/min sustained, burst 3
+	stopCleanup := make(chan struct{})
+	resolveLimiter.StartCleanup(5*time.Minute, stopCleanup)
+	deckLimiter.StartCleanup(5*time.Minute, stopCleanup)
+
+	// Expired decks are never deleted otherwise (deckstore has no TTL of its
+	// own) — an hourly sweep is frequent enough that storage never grows far
+	// past what's actually live, without hammering the store's List/Get on a
+	// hobby-scale deck count.
+	deck.StartCleanupLoop(store, 1*time.Hour, stopCleanup)
+
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/api/deck/validate-yt", deck.ValidateYtHandler)
-	mux.HandleFunc("/api/deck/import-playlist", deck.ImportPlaylistHandler)
+	mux.HandleFunc("/api/deck/validate-yt", rateLimited(deckLimiter, deck.ValidateYtHandler))
+	mux.HandleFunc("/api/deck/import-playlist", rateLimited(deckLimiter, deck.ImportPlaylistHandler))
 	mux.HandleFunc("/api/deck/", deckHandler.GetDeck)
-	mux.HandleFunc("/api/deck", deckHandler.CreateDeck)
+	mux.HandleFunc("/api/deck", rateLimited(deckLimiter, deckHandler.CreateDeck))
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -191,7 +247,7 @@ func main() {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 
-	mux.HandleFunc("/api/resolve", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/resolve", rateLimited(resolveLimiter, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
@@ -278,7 +334,7 @@ func main() {
 		resp.Links["spotify"] = resp.SpotifyURL
 
 		writeJSON(w, http.StatusOK, resp)
-	})
+	}))
 
 	// cors must wrap gzip, not the other way round — otherwise an OPTIONS
 	// preflight's empty 204 response (written by cors, never reaching gzip's
@@ -309,6 +365,7 @@ func main() {
 
 	<-stop
 	slog.Info("shutdown signal received, shutting down server")
+	close(stopCleanup)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {

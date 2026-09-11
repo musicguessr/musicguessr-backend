@@ -27,6 +27,11 @@ var httpClient = &http.Client{
 var musicbrainzUserAgent = "musicguessr/0.1 (https://github.com/musicguessr)"
 var cacheTTL = 24 * time.Hour
 
+// providerTimeout bounds a single provider call — shorter than Resolve's
+// overall 6s budget so one slow provider can't eat the whole request when
+// quorum needs it (see the call site in Resolve).
+const providerTimeout = 3 * time.Second
+
 func init() {
 	if s := os.Getenv("METADATA_CACHE_TTL_SECONDS"); s != "" {
 		if n, err := strconv.Atoi(s); err == nil && n > 0 {
@@ -108,7 +113,17 @@ func Resolve(ctx context.Context, artist, title string) (*itunes.Track, error) {
 					slog.Error("metadata provider panicked", "provider", name, "panic", r)
 				}
 			}()
-			t, err := fn(ctx, artist, title)
+			// Each provider gets its own budget, shorter than the overall
+			// request timeout. Without this, a single free third-party API
+			// having a slow day can sit on the shared httpClient.Timeout (6s)
+			// for the full duration even when quorum is only waiting on this
+			// one straggler — capping it here means a request that needs this
+			// provider for quorum fails fast and falls back to whichever
+			// providers did answer, instead of the request tail latency being
+			// dictated by the single slowest provider in play.
+			pctx, pcancel := context.WithTimeout(ctx, providerTimeout)
+			t, err := fn(pctx, artist, title)
+			pcancel()
 			if err != nil || t == nil {
 				return
 			}

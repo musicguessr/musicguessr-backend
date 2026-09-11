@@ -30,3 +30,20 @@ func (s *memoryStore) Get(_ context.Context, id string) ([]byte, error) {
 	}
 	return d, nil
 }
+
+func (s *memoryStore) Delete(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.data, id)
+	return nil
+}
+
+func (s *memoryStore) List(_ context.Context) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	ids := make([]string, 0, len(s.data))
+	for id := range s.data {
+		ids = append(ids, id)
+	}
+	return ids, nil
+}

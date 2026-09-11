@@ -3,10 +3,12 @@ package deckstore
 import (
 	"bytes"
 	"context"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -58,6 +60,15 @@ func newS3(cfg s3Config) (*s3Store, error) {
 func (s *s3Store) objectURL(id string) string {
 	base := strings.TrimRight(s.cfg.endpoint, "/")
 	return fmt.Sprintf("%s/%s/%s.json", base, s.cfg.bucket, id)
+}
+
+func (s *s3Store) bucketURL(rawQuery string) string {
+	base := strings.TrimRight(s.cfg.endpoint, "/")
+	u := fmt.Sprintf("%s/%s", base, s.cfg.bucket)
+	if rawQuery != "" {
+		u += "?" + rawQuery
+	}
+	return u
 }
 
 func (s *s3Store) Put(ctx context.Context, id string, data []byte) error {
@@ -112,4 +123,81 @@ func (s *s3Store) Get(ctx context.Context, id string) ([]byte, error) {
 		return nil, fmt.Errorf("deckstore/s3: object exceeds %d byte limit", maxSize)
 	}
 	return data, nil
+}
+
+func (s *s3Store) Delete(ctx context.Context, id string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, s.objectURL(id), nil)
+	if err != nil {
+		return err
+	}
+	signRequest(req, s.cfg.accessKey, s.cfg.secretKey, s.cfg.region, nil)
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	// 204 is S3's normal response; 404 means it's already gone — both count
+	// as success per Delete's "not an error to delete a missing id" contract.
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("deckstore/s3: DELETE returned %d: %s", resp.StatusCode, body)
+	}
+	return nil
+}
+
+type s3ListResult struct {
+	IsTruncated           bool   `xml:"IsTruncated"`
+	NextContinuationToken string `xml:"NextContinuationToken"`
+	Contents              []struct {
+		Key string `xml:"Key"`
+	} `xml:"Contents"`
+}
+
+// List enumerates every object in the bucket via ListObjectsV2, paginating
+// through continuation tokens until IsTruncated is false.
+func (s *s3Store) List(ctx context.Context) ([]string, error) {
+	var ids []string
+	continuationToken := ""
+	for {
+		q := url.Values{}
+		q.Set("list-type", "2")
+		q.Set("max-keys", "1000")
+		if continuationToken != "" {
+			q.Set("continuation-token", continuationToken)
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.bucketURL(q.Encode()), nil)
+		if err != nil {
+			return nil, err
+		}
+		signRequest(req, s.cfg.accessKey, s.cfg.secretKey, s.cfg.region, nil)
+
+		resp, err := s.client.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+		_ = resp.Body.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("deckstore/s3: read list response: %w", readErr)
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("deckstore/s3: LIST returned %d: %s", resp.StatusCode, body)
+		}
+
+		var result s3ListResult
+		if err := xml.Unmarshal(body, &result); err != nil {
+			return nil, fmt.Errorf("deckstore/s3: parse list response: %w", err)
+		}
+		for _, c := range result.Contents {
+			ids = append(ids, strings.TrimSuffix(c.Key, ".json"))
+		}
+
+		if !result.IsTruncated || result.NextContinuationToken == "" {
+			break
+		}
+		continuationToken = result.NextContinuationToken
+	}
+	return ids, nil
 }

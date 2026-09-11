@@ -7,14 +7,19 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/musicguessr/musicguessr-backend/internal/deckstore"
 )
 
-// mockStore is an in-memory Store implementation for testing.
+// mockStore is an in-memory Store implementation for testing. It's mutex-
+// guarded because CreateDeck's enrichCard fan-out and CleanupExpired's sweep
+// both hit it from multiple goroutines concurrently, same as a real store
+// needs to tolerate.
 type mockStore struct {
+	mu   sync.Mutex
 	data map[string][]byte
 	err  error
 }
@@ -24,6 +29,8 @@ func newMockStore() *mockStore {
 }
 
 func (m *mockStore) Put(_ context.Context, id string, data []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.err != nil {
 		return m.err
 	}
@@ -32,6 +39,8 @@ func (m *mockStore) Put(_ context.Context, id string, data []byte) error {
 }
 
 func (m *mockStore) Get(_ context.Context, id string) ([]byte, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.err != nil {
 		return nil, m.err
 	}
@@ -40,6 +49,29 @@ func (m *mockStore) Get(_ context.Context, id string) ([]byte, error) {
 		return nil, deckstore.ErrNotFound
 	}
 	return d, nil
+}
+
+func (m *mockStore) Delete(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.err != nil {
+		return m.err
+	}
+	delete(m.data, id)
+	return nil
+}
+
+func (m *mockStore) List(_ context.Context) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.err != nil {
+		return nil, m.err
+	}
+	ids := make([]string, 0, len(m.data))
+	for id := range m.data {
+		ids = append(ids, id)
+	}
+	return ids, nil
 }
 
 func TestGetDeck_MethodNotAllowed(t *testing.T) {
