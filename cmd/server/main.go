@@ -23,6 +23,7 @@ import (
 	"github.com/musicguessr/musicguessr-backend/internal/ratelimit"
 	"github.com/musicguessr/musicguessr-backend/internal/rcache"
 	"github.com/musicguessr/musicguessr-backend/internal/resolver"
+	"github.com/musicguessr/musicguessr-backend/internal/spotifyapi"
 	"github.com/musicguessr/musicguessr-backend/internal/youtube"
 )
 
@@ -214,6 +215,17 @@ func main() {
 		youtube.SetCache(youtubeCacheAdapter{c: resolveCache})
 	}
 
+	// Optional: authoritative per-track metadata straight from Spotify's own
+	// catalog (Client Credentials Flow — app-only, no user auth) for the
+	// exact track ID already resolved from the QR code. nil when
+	// SPOTIFY_CLIENT_ID/SPOTIFY_CLIENT_SECRET aren't set; every call site
+	// treats a nil *Client the same as "unavailable right now" (see
+	// spotifyapi's circuit breaker), so this is safe to leave unconfigured.
+	spotifyClient := spotifyapi.New()
+	if spotifyClient != nil {
+		slog.Info("spotify metadata enrichment enabled")
+	}
+
 	// Both endpoints groups are public with no auth, so they're the surface
 	// most exposed to abuse (scripted scraping, or someone hammering the
 	// yt-dlp subprocess path). Limits are per-IP and generous enough for
@@ -306,6 +318,21 @@ func main() {
 				ytVideoID, ytErr = youtube.SearchVideoID(r.Context(), artist, title, allowVariants)
 			}()
 
+			// spotifyClient is nil when SPOTIFY_CLIENT_ID/SPOTIFY_CLIENT_SECRET
+			// aren't configured — GetTrack on a nil *Client returns an error
+			// immediately, so this goroutine is cheap and harmless either way.
+			var spTrack *spotifyapi.Track
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				t, err := spotifyClient.GetTrack(r.Context(), spotifyID)
+				if err != nil {
+					slog.Debug("spotify track lookup unavailable, using metadata fanout instead", "spotify_id", spotifyID, "err", err)
+					return
+				}
+				spTrack = t
+			}()
+
 			if track, err := metadata.Resolve(r.Context(), artist, title); err == nil {
 				resp.Artist = track.Artist
 				resp.Title = track.Title
@@ -325,6 +352,29 @@ func main() {
 			}
 
 			wg.Wait()
+
+			// Spotify's own catalog data for this exact track ID is
+			// authoritative — no fuzzy artist/title matching involved — so
+			// when available it overrides the metadata fanout's
+			// majority-voted fields, which can occasionally land on a
+			// re-recording/cover (see chooseMostCommonInt's tiebreak
+			// comment). Apple Music URL and the other streaming links still
+			// come from the fanout above; Spotify's API doesn't provide them.
+			if spTrack != nil {
+				if spTrack.Artist != "" {
+					resp.Artist = spTrack.Artist
+				}
+				if spTrack.Title != "" {
+					resp.Title = spTrack.Title
+				}
+				if spTrack.Year != 0 {
+					resp.Year = spTrack.Year
+				}
+				if spTrack.ArtworkURL != "" {
+					resp.ArtworkURL = spTrack.ArtworkURL
+				}
+			}
+
 			if ytErr == nil {
 				resp.YouTubeVideoID = ytVideoID
 			} else {
