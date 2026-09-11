@@ -301,9 +301,16 @@ func chooseMostCommonInt(nums []int) int {
 	for _, n := range nums {
 		counts[n]++
 	}
+	// Deterministic tiebreak, but unlike chooseMostCommon's "prefer larger",
+	// a tied year prefers the *older* value. Old TV/film themes are very
+	// often re-recorded (licensing is usually cheaper than the original
+	// master), and a re-recording's release year is essentially always
+	// later than the original's, never earlier — so on a tie between
+	// providers, the older year is the safer bet for "what year is this
+	// song actually from", which is what a Hitster-style game is asking.
 	best, bestc := 0, 0
 	for k, v := range counts {
-		if v > bestc || (v == bestc && k > best) {
+		if v > bestc || (v == bestc && k < best) {
 			best = k
 			bestc = v
 		}

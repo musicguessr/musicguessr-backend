@@ -61,10 +61,14 @@ func TestChooseMostCommonInt(t *testing.T) {
 			t.Errorf("got %d, want 0", got)
 		}
 	})
-	t.Run("tiebreaker prefers higher value", func(t *testing.T) {
+	t.Run("tiebreaker prefers older year", func(t *testing.T) {
+		// Re-recordings/remasters of a track are essentially always dated
+		// later than the original, never earlier, so on a tie the older
+		// year is the safer guess for "what year is this song actually
+		// from" — see the comment on chooseMostCommonInt.
 		got := chooseMostCommonInt([]int{1995, 2000})
-		if got != 2000 {
-			t.Errorf("got %d, want 2000", got)
+		if got != 1995 {
+			t.Errorf("got %d, want 1995", got)
 		}
 	})
 }
