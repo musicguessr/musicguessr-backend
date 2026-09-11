@@ -45,11 +45,41 @@ type Track struct {
 	Title      string
 	Year       int
 	ArtworkURL string
+	Album      string
+	Explicit   bool
 }
 
 type cacheEntry struct {
 	track   Track
 	expires time.Time
+}
+
+// Cache allows plugging in a persistent store (see internal/rcache) so a
+// track's data survives process restarts and isn't re-fetched from Spotify
+// on every scan of the same card — mirrors the metadata and youtube
+// packages' SetCache pattern. Unset (nil) by default, in which case GetTrack
+// falls back to the in-process, restart-losing cache on Client itself.
+type Cache interface {
+	Get(key string) (*Track, bool)
+	Set(key string, t *Track)
+}
+
+var (
+	externalCacheMu sync.RWMutex
+	externalCache   Cache
+)
+
+// SetCache installs a persistent cache for GetTrack results.
+func SetCache(c Cache) {
+	externalCacheMu.Lock()
+	externalCache = c
+	externalCacheMu.Unlock()
+}
+
+func getExternalCache() Cache {
+	externalCacheMu.RLock()
+	defer externalCacheMu.RUnlock()
+	return externalCache
 }
 
 // Client holds Client Credentials Flow state: the cached app access token
@@ -101,13 +131,19 @@ func (c *Client) GetTrack(ctx context.Context, trackID string) (*Track, error) {
 		return nil, fmt.Errorf("spotifyapi: not configured")
 	}
 
-	c.cacheMu.RLock()
-	if e, ok := c.cache[trackID]; ok && time.Now().Before(e.expires) {
+	if ext := getExternalCache(); ext != nil {
+		if t, ok := ext.Get(trackID); ok {
+			return t, nil
+		}
+	} else {
+		c.cacheMu.RLock()
+		if e, ok := c.cache[trackID]; ok && time.Now().Before(e.expires) {
+			c.cacheMu.RUnlock()
+			t := e.track
+			return &t, nil
+		}
 		c.cacheMu.RUnlock()
-		t := e.track
-		return &t, nil
 	}
-	c.cacheMu.RUnlock()
 
 	token, err := c.getToken(ctx)
 	if err != nil {
@@ -139,11 +175,13 @@ func (c *Client) GetTrack(ctx context.Context, trackID string) (*Track, error) {
 	}
 
 	var t struct {
-		Name    string `json:"name"`
-		Artists []struct {
+		Name     string `json:"name"`
+		Explicit bool   `json:"explicit"`
+		Artists  []struct {
 			Name string `json:"name"`
 		} `json:"artists"`
 		Album struct {
+			Name        string `json:"name"`
 			ReleaseDate string `json:"release_date"`
 			Images      []struct {
 				URL string `json:"url"`
@@ -154,7 +192,7 @@ func (c *Client) GetTrack(ctx context.Context, trackID string) (*Track, error) {
 		return nil, err
 	}
 
-	track := Track{Title: t.Name}
+	track := Track{Title: t.Name, Album: t.Album.Name, Explicit: t.Explicit}
 	if len(t.Artists) > 0 {
 		track.Artist = t.Artists[0].Name
 	}
@@ -168,9 +206,13 @@ func (c *Client) GetTrack(ctx context.Context, trackID string) (*Track, error) {
 		track.ArtworkURL = t.Album.Images[0].URL
 	}
 
-	c.cacheMu.Lock()
-	c.cache[trackID] = cacheEntry{track: track, expires: time.Now().Add(trackCacheTTL)}
-	c.cacheMu.Unlock()
+	if ext := getExternalCache(); ext != nil {
+		ext.Set(trackID, &track)
+	} else {
+		c.cacheMu.Lock()
+		c.cache[trackID] = cacheEntry{track: track, expires: time.Now().Add(trackCacheTTL)}
+		c.cacheMu.Unlock()
+	}
 
 	return &track, nil
 }

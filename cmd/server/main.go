@@ -62,6 +62,24 @@ func (a youtubeCacheAdapter) Set(key, videoID string) {
 	a.c.SetJSON(context.Background(), "youtube", key, videoID)
 }
 
+// spotifyCacheAdapter implements spotifyapi.Cache the same way — keyed by
+// Spotify track ID (not artist|title, since this lookup is an exact-ID
+// fetch), so it shares the "metadata"/"youtube" namespaces' persistence
+// without colliding with either.
+type spotifyCacheAdapter struct{ c *rcache.Cache }
+
+func (a spotifyCacheAdapter) Get(key string) (*spotifyapi.Track, bool) {
+	var t spotifyapi.Track
+	if a.c.GetJSON(context.Background(), "spotify-track", key, &t) {
+		return &t, true
+	}
+	return nil, false
+}
+
+func (a spotifyCacheAdapter) Set(key string, t *spotifyapi.Track) {
+	a.c.SetJSON(context.Background(), "spotify-track", key, t)
+}
+
 // sharedTransport is reused by all HTTP clients for connection pooling.
 var sharedTransport = &http.Transport{
 	MaxIdleConns:        100,
@@ -115,6 +133,8 @@ type resolveResponse struct {
 	Title          string            `json:"title,omitempty"`
 	Year           int               `json:"year,omitempty"`
 	ArtworkURL     string            `json:"artwork_url,omitempty"`
+	Album          string            `json:"album,omitempty"`
+	Explicit       bool              `json:"explicit,omitempty"`
 	YouTubeVideoID string            `json:"youtube_video_id,omitempty"`
 	Links          map[string]string `json:"links"`
 }
@@ -210,11 +230,6 @@ func main() {
 		slog.Error("rcache init failed", "err", err)
 		os.Exit(1)
 	}
-	if resolveCache.Enabled() {
-		metadata.SetCache(metadataCacheAdapter{c: resolveCache})
-		youtube.SetCache(youtubeCacheAdapter{c: resolveCache})
-	}
-
 	// Optional: authoritative per-track metadata straight from Spotify's own
 	// catalog (Client Credentials Flow — app-only, no user auth) for the
 	// exact track ID already resolved from the QR code. nil when
@@ -224,6 +239,18 @@ func main() {
 	spotifyClient := spotifyapi.New()
 	if spotifyClient != nil {
 		slog.Info("spotify metadata enrichment enabled")
+	}
+
+	if resolveCache.Enabled() {
+		metadata.SetCache(metadataCacheAdapter{c: resolveCache})
+		youtube.SetCache(youtubeCacheAdapter{c: resolveCache})
+		// Without this, a Spotify track lookup only survives in
+		// spotifyapi's own in-process map — lost on every restart (which
+		// happens often across deploys), so the very next scan of an
+		// already-seen card would hit Spotify's API again for no reason.
+		// Sharing the same persistent Valkey+S3 tiers as metadata/youtube
+		// means it's also the permanent, restart-proof source of truth.
+		spotifyapi.SetCache(spotifyCacheAdapter{c: resolveCache})
 	}
 
 	// Both endpoints groups are public with no auth, so they're the surface
@@ -373,6 +400,10 @@ func main() {
 				if spTrack.ArtworkURL != "" {
 					resp.ArtworkURL = spTrack.ArtworkURL
 				}
+				// Album/Explicit have no fanout equivalent to fall back to —
+				// only Spotify's own API provides them.
+				resp.Album = spTrack.Album
+				resp.Explicit = spTrack.Explicit
 			}
 
 			if ytErr == nil {

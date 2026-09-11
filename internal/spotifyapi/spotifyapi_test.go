@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -130,6 +131,76 @@ func TestCircuitBreaker_OpensAfterRepeatedAuthFailures(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&tokenCalls); got != maxConsecutiveFailures {
 		t.Fatalf("got %d token calls, want still %d — circuit breaker should have short-circuited", got, maxConsecutiveFailures)
+	}
+}
+
+type fakeCache struct {
+	mu    sync.Mutex
+	store map[string]*Track
+	gets  int32
+	sets  int32
+}
+
+func newFakeCache() *fakeCache {
+	return &fakeCache{store: make(map[string]*Track)}
+}
+
+func (f *fakeCache) Get(key string) (*Track, bool) {
+	atomic.AddInt32(&f.gets, 1)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	t, ok := f.store[key]
+	return t, ok
+}
+
+func (f *fakeCache) Set(key string, t *Track) {
+	atomic.AddInt32(&f.sets, 1)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.store[key] = t
+}
+
+func TestGetTrack_UsesExternalCacheWhenSet(t *testing.T) {
+	var apiCalls int32
+	c := newTestClient(t,
+		jsonHandler(map[string]any{"access_token": "tok", "expires_in": 3600}),
+		func(w http.ResponseWriter, r *http.Request) {
+			atomic.AddInt32(&apiCalls, 1)
+			jsonHandler(map[string]any{
+				"name":    "T",
+				"artists": []map[string]string{{"name": "A"}},
+				"album":   map[string]any{"name": "Alb", "release_date": "1976"},
+			})(w, r)
+		},
+	)
+
+	fc := newFakeCache()
+	SetCache(fc)
+	t.Cleanup(func() { SetCache(nil) })
+
+	// First call: cache miss, hits the real (test) API, then populates the
+	// external cache — not the package's own in-memory fallback.
+	track, err := c.GetTrack(context.Background(), "id1")
+	if err != nil {
+		t.Fatalf("GetTrack: %v", err)
+	}
+	if track.Album != "Alb" {
+		t.Fatalf("got album %q, want Alb", track.Album)
+	}
+	if got := atomic.LoadInt32(&apiCalls); got != 1 {
+		t.Fatalf("got %d api calls, want 1", got)
+	}
+	if got := atomic.LoadInt32(&fc.sets); got != 1 {
+		t.Fatalf("got %d cache sets, want 1", got)
+	}
+
+	// Second call for the same id: must be served from the external cache,
+	// not a second API round-trip.
+	if _, err := c.GetTrack(context.Background(), "id1"); err != nil {
+		t.Fatalf("GetTrack (cached): %v", err)
+	}
+	if got := atomic.LoadInt32(&apiCalls); got != 1 {
+		t.Fatalf("got %d api calls after a cached lookup, want still 1", got)
 	}
 }
 
