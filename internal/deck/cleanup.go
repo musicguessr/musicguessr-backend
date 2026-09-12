@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,6 +38,18 @@ func CleanupExpired(ctx context.Context, store deckstore.Store) (deleted int, er
 	now := time.Now().UTC()
 
 	for _, id := range ids {
+		if strings.Contains(id, "/") {
+			// Not a deck — deck storage and internal/rcache's resolve cache
+			// share the same S3 bucket (tan-nakamura), and rcache namespaces
+			// its keys as "<namespace>/<hash>" (e.g. "youtube/<hash>") to get
+			// its own S3 "folder". Deck IDs are always flat (nanoid-style, no
+			// "/"), so this is the cheap way to tell the two apart without a
+			// deckstore-level prefix filter that both callers would need to
+			// pass through. Skipping here (not attempting Get+unmarshal)
+			// avoids a wasted S3 GET per cache entry and the resulting
+			// "skipping corrupted deck" warning spam every sweep.
+			continue
+		}
 		sem <- struct{}{}
 		wg.Add(1)
 		go func(id string) {

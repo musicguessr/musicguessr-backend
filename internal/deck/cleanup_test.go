@@ -54,6 +54,26 @@ func TestCleanupExpired_SkipsCorruptedEntries(t *testing.T) {
 	}
 }
 
+func TestCleanupExpired_SkipsNamespacedCacheKeys(t *testing.T) {
+	// Deck storage and internal/rcache share the same S3 bucket — rcache
+	// entries look like "youtube/<hash>" and must never be fetched or
+	// treated as a (corrupted) deck.
+	store := newMockStore()
+	_ = store.Put(context.Background(), "youtube/abc123hash", []byte(`"dQw4w9WgXcQ"`))
+	putDeck(t, store, "live", time.Now().Add(time.Hour))
+
+	deleted, err := CleanupExpired(context.Background(), store)
+	if err != nil {
+		t.Fatalf("CleanupExpired: %v", err)
+	}
+	if deleted != 0 {
+		t.Fatalf("got %d deleted, want 0", deleted)
+	}
+	if _, ok := store.data["youtube/abc123hash"]; !ok {
+		t.Error("namespaced cache key should be left alone, not deleted")
+	}
+}
+
 func TestCleanupExpired_EmptyStore(t *testing.T) {
 	store := newMockStore()
 	deleted, err := CleanupExpired(context.Background(), store)
