@@ -29,8 +29,9 @@ func extractYtID(raw string) (string, error) {
 	if err != nil || !isYouTubeHost(u.Host) {
 		return "", fmt.Errorf("not a youtube.com or youtu.be url")
 	}
-	// youtu.be/{id}
-	if u.Host == "youtu.be" || strings.HasSuffix(strings.ToLower(u.Host), ".youtu.be") {
+	// youtu.be/{id} — isYouTubeHost only admits youtu.be exactly (never a
+	// subdomain of it), so an exact match is the whole case here.
+	if strings.ToLower(u.Host) == "youtu.be" {
 		id := strings.TrimPrefix(u.Path, "/")
 		if ytIDRe.MatchString(id) {
 			return id, nil

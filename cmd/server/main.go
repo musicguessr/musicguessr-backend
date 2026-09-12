@@ -104,13 +104,75 @@ var (
 
 const spotifyCacheTTL = 7 * 24 * time.Hour
 
+// startSpotifyCacheCleanup periodically drops expired entries from the
+// in-process oEmbed cache. Mirrors ratelimit.Limiter.StartCleanup: entries
+// carry an expiry that the read path honours, but nothing reclaimed the
+// memory of one that's simply never looked up again.
+func startSpotifyCacheCleanup(interval time.Duration, stop <-chan struct{}) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				now := time.Now()
+				spotifyCacheMu.Lock()
+				for id, e := range spotifyCache {
+					if now.After(e.expires) {
+						delete(spotifyCache, id)
+					}
+				}
+				spotifyCacheMu.Unlock()
+			case <-stop:
+				return
+			}
+		}
+	}()
+}
+
+// bodyAllowedForStatus mirrors net/http's own (unexported) rule for which
+// status codes may carry a response body. Statuses that may not (1xx, 204,
+// 304) make any write — including gzip's header/trailer bytes — fail with
+// "http: request method or response status code does not allow body".
+func bodyAllowedForStatus(status int) bool {
+	switch {
+	case status >= 100 && status <= 199:
+		return false
+	case status == http.StatusNoContent:
+		return false
+	case status == http.StatusNotModified:
+		return false
+	}
+	return true
+}
+
 // gzipResponseWriter wraps http.ResponseWriter to compress the body.
 type gzipResponseWriter struct {
 	http.ResponseWriter
 	gz *gzip.Writer
+	// Defaults to true so a handler that writes without ever calling
+	// WriteHeader (implicit 200) still gets its body flushed — only an
+	// explicit bodiless status flips this off.
+	bodyAllowed bool
 }
 
 func (g *gzipResponseWriter) Write(b []byte) (int, error) { return g.gz.Write(b) }
+
+// WriteHeader drops the Content-Encoding promise for responses that can't
+// carry a body. Without this, /api/client-error's 204 (and any 304) still
+// advertised gzip and then had gz.Close()'s trailer write rejected by
+// net/http, logging a spurious ERROR for every single such response — which
+// made the ERROR level pure noise, since that was the only thing producing
+// one. Content-Encoding is deleted rather than left dangling because a 204
+// that claims a gzip body it doesn't have is also just wrong on the wire.
+// Vary stays: the response still varies by Accept-Encoding.
+func (g *gzipResponseWriter) WriteHeader(status int) {
+	if !bodyAllowedForStatus(status) {
+		g.bodyAllowed = false
+		g.ResponseWriter.Header().Del("Content-Encoding")
+	}
+	g.ResponseWriter.WriteHeader(status)
+}
 
 func gzipMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -121,12 +183,19 @@ func gzipMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("Content-Encoding", "gzip")
 		w.Header().Set("Vary", "Accept-Encoding")
 		gz := gzip.NewWriter(w)
+		gw := &gzipResponseWriter{ResponseWriter: w, gz: gz, bodyAllowed: true}
 		defer func() {
+			if !gw.bodyAllowed {
+				// Nothing was (or could be) written through gz — closing it
+				// here would emit the gzip header/trailer into a response
+				// that's not allowed to have one.
+				return
+			}
 			if err := gz.Close(); err != nil {
 				slog.Error("gzip close failed", "err", err)
 			}
 		}()
-		next.ServeHTTP(&gzipResponseWriter{ResponseWriter: w, gz: gz}, r)
+		next.ServeHTTP(gw, r)
 	})
 }
 
@@ -373,10 +442,22 @@ func main() {
 	// real session at most) — this exists to catch someone trying to use the
 	// endpoint as a free-form log-spam sink, not to throttle real usage.
 	clientErrorLimiter := ratelimit.New(0.2, 5, 10*time.Minute) // ~12/min sustained, burst 5
+	// Deck reads are cheap per call but still a billed S3 GET each, including
+	// for ids that don't exist — without a limit this is the only public
+	// endpoint doing external I/O that someone can hammer for free. Generous
+	// enough that opening a deck, reloading it, and paging through a shared
+	// link never comes close.
+	deckReadLimiter := ratelimit.New(2, 30, 10*time.Minute) // ~120/min sustained, burst 30
 	stopCleanup := make(chan struct{})
 	resolveLimiter.StartCleanup(5*time.Minute, stopCleanup)
 	deckLimiter.StartCleanup(5*time.Minute, stopCleanup)
 	clientErrorLimiter.StartCleanup(5*time.Minute, stopCleanup)
+	deckReadLimiter.StartCleanup(5*time.Minute, stopCleanup)
+	// The in-process Spotify oEmbed cache has per-entry expiry but nothing
+	// that ever removes a stale entry — now that cachewarm pushes whole decks
+	// through fetchSpotifyMeta, it would otherwise grow monotonically toward
+	// one entry per card in the entire Hitster catalogue and never shrink.
+	startSpotifyCacheCleanup(30*time.Minute, stopCleanup)
 
 	// Expired decks are never deleted otherwise (deckstore has no TTL of its
 	// own) — an hourly sweep is frequent enough that storage never grows far
@@ -388,7 +469,7 @@ func main() {
 
 	mux.HandleFunc("/api/deck/validate-yt", rateLimited(deckLimiter, deck.ValidateYtHandler))
 	mux.HandleFunc("/api/deck/import-playlist", rateLimited(deckLimiter, deck.ImportPlaylistHandler))
-	mux.HandleFunc("/api/deck/", deckHandler.GetDeck)
+	mux.HandleFunc("/api/deck/", rateLimited(deckReadLimiter, deckHandler.GetDeck))
 	mux.HandleFunc("/api/deck", rateLimited(deckLimiter, deckHandler.CreateDeck))
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -445,8 +526,13 @@ func main() {
 		// now that we know someone's actively playing it — see
 		// internal/cachewarm. Paced slowly and deduped per-deck, so this
 		// never adds request volume anywhere close to what would risk a
-		// rate limit/ban from a provider.
-		warmer.TriggerDeck(deckID, res.CardsInDeck(deckID))
+		// rate limit/ban from a provider. ShouldWarm gates CardsInDeck
+		// because that call scans the resolver's whole lookup map under its
+		// read lock — far too expensive to pay on every request just to have
+		// TriggerDeck drop it as already-warmed, which is the common case.
+		if warmer.ShouldWarm(deckID) {
+			warmer.TriggerDeck(deckID, res.CardsInDeck(deckID))
+		}
 
 		resp := resolveResponse{
 			SpotifyID:  spotifyID,
@@ -595,14 +681,19 @@ func main() {
 	warmer.Stop()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
-		slog.Error("graceful shutdown failed", "err", err)
-		os.Exit(1)
+	shutdownErr := srv.Shutdown(ctx)
+	if shutdownErr != nil {
+		slog.Error("graceful shutdown failed", "err", shutdownErr)
 	}
 	if axiomWriter != nil {
 		// Flushes whatever's still buffered (e.g. this shutdown sequence's
-		// own log lines) before the process actually exits.
+		// own log lines) before the process actually exits. Must run before
+		// any os.Exit below — exiting first would discard exactly the
+		// shutdown-failure line a maintainer would want shipped.
 		axiomWriter.Close()
+	}
+	if shutdownErr != nil {
+		os.Exit(1)
 	}
 }
 
@@ -633,7 +724,9 @@ func fetchSpotifyMeta(ctx context.Context, client *http.Client, trackID string) 
 	// read up to first 32KB of the response
 	limited := io.LimitReader(resp.Body, 32*1024)
 	body, _ := io.ReadAll(limited)
-	html := string(body)
+	// Deliberately not named "html" — that would shadow the imported html
+	// package for the rest of this function.
+	page := string(body)
 
 	// og:title → track title. Spotify uses several formats:
 	//   "Track Name - song by Artist | Spotify"          (most common)
@@ -641,10 +734,10 @@ func fetchSpotifyMeta(ctx context.Context, client *http.Client, trackID string) 
 	//   "Track Name | Spotify"
 	//   "Track Name - Radio edit"                        (no Spotify suffix — use raw)
 	const ogTitleNeedle = `og:title" content="`
-	if idx := strings.Index(html, ogTitleNeedle); idx != -1 {
+	if idx := strings.Index(page, ogTitleNeedle); idx != -1 {
 		start := idx + len(ogTitleNeedle)
-		if end := strings.Index(html[start:], `"`); end != -1 {
-			raw := decodeHTMLEntities(html[start : start+end])
+		if end := strings.Index(page[start:], `"`); end != -1 {
+			raw := decodeHTMLEntities(page[start : start+end])
 			slog.Debug("spotify og:title", "trackID", trackID, "raw", raw)
 			if sep := strings.Index(raw, " - song"); sep != -1 {
 				title = strings.TrimSpace(raw[:sep])
@@ -668,10 +761,10 @@ func fetchSpotifyMeta(ctx context.Context, client *http.Client, trackID string) 
 	// We therefore prefer og:title for the title and only fall back to og:description parts[1]
 	// when og:title parsing returned nothing.
 	const ogDescNeedle = `og:description" content="`
-	if idx := strings.Index(html, ogDescNeedle); idx != -1 {
+	if idx := strings.Index(page, ogDescNeedle); idx != -1 {
 		start := idx + len(ogDescNeedle)
-		if end := strings.Index(html[start:], `"`); end != -1 {
-			desc := decodeHTMLEntities(html[start : start+end])
+		if end := strings.Index(page[start:], `"`); end != -1 {
+			desc := decodeHTMLEntities(page[start : start+end])
 			slog.Debug("spotify og:description", "trackID", trackID, "desc", desc)
 			parts := strings.Split(desc, " · ")
 			if len(parts) >= 1 {

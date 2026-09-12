@@ -154,8 +154,18 @@ type s3ListResult struct {
 	} `xml:"Contents"`
 }
 
-// List enumerates every object in the bucket via ListObjectsV2, paginating
-// through continuation tokens until IsTruncated is false.
+// List enumerates the bucket's top-level objects via ListObjectsV2,
+// paginating through continuation tokens until IsTruncated is false.
+//
+// delimiter="/" makes this non-recursive, matching localStore.List's
+// documented behaviour (the two backends previously disagreed on this).
+// That matters because this bucket is shared with internal/rcache, whose
+// keys are namespaced "<namespace>/<hash>": with a delimiter, S3 rolls
+// those up into CommonPrefixes — which we don't request — instead of
+// returning every single one in Contents. The only caller is the deck
+// expiry sweep, so without it an hourly sweep pages through the entire
+// resolve cache (already hundreds of objects, and growing toward one per
+// namespace per track as cachewarm runs) to find a handful of decks.
 func (s *s3Store) List(ctx context.Context) ([]string, error) {
 	var ids []string
 	continuationToken := ""
@@ -163,6 +173,7 @@ func (s *s3Store) List(ctx context.Context) ([]string, error) {
 		q := url.Values{}
 		q.Set("list-type", "2")
 		q.Set("max-keys", "1000")
+		q.Set("delimiter", "/")
 		if continuationToken != "" {
 			q.Set("continuation-token", continuationToken)
 		}

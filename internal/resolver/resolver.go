@@ -109,14 +109,55 @@ type Resolver struct {
 	timestamp int64
 }
 
+// initialRetryBackoff is how long to wait between retries when the very
+// first load fails. Without these, an empty lookup map means every scan
+// answers "card not found" until refreshLoop's first hourly tick — an
+// outcome far out of proportion to a few seconds of upstream flakiness at
+// container start, which is exactly when it's most likely (the process
+// restarts on every deploy).
+var initialRetryBackoff = []time.Duration{
+	5 * time.Second,
+	15 * time.Second,
+	30 * time.Second,
+	time.Minute,
+	2 * time.Minute,
+	5 * time.Minute,
+}
+
 func New() *Resolver {
 	r := &Resolver{}
 	r.lookup = make(map[string]string)
 	if err := r.load(); err != nil {
 		slog.Error("initial db load failed", "err", err)
+		go r.retryInitialLoad()
 	}
 	go r.refreshLoop()
 	return r
+}
+
+// ready reports whether any card data is loaded. False means every Resolve
+// call will fail regardless of input.
+func (r *Resolver) ready() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.lookup) > 0
+}
+
+func (r *Resolver) retryInitialLoad() {
+	for i, d := range initialRetryBackoff {
+		time.Sleep(d)
+		// refreshLoop's own tick may have won the race in the meantime.
+		if r.ready() {
+			return
+		}
+		if err := r.load(); err != nil {
+			slog.Error("gameset database retry failed", "err", err, "attempt", i+1, "of", len(initialRetryBackoff))
+			continue
+		}
+		slog.Info("gameset database loaded after initial failure", "attempt", i+1)
+		return
+	}
+	slog.Error("gameset database still unavailable after initial retries, waiting for hourly refresh")
 }
 
 // Resolve returns the Spotify track ID for a scanned QR URL, plus the

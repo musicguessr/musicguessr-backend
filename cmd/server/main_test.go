@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -110,6 +111,78 @@ func TestGzipMiddleware_WithGzipEncoding(t *testing.T) {
 	}
 	if string(body) != "hello world" {
 		t.Errorf("decompressed body = %q, want %q", string(body), "hello world")
+	}
+}
+
+// A 204 can't carry a body, so gzip's header/trailer must never be written
+// for one. This needs a real server rather than httptest.NewRecorder, which
+// accepts writes net/http itself rejects — the rejection is the whole bug:
+// gz.Close() failing here logged an ERROR for every single client-error
+// report, which was the only thing producing ERROR lines at all.
+func TestGzipMiddleware_NoContentStatusDoesNotLogError(t *testing.T) {
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	defer slog.SetDefault(prev)
+
+	srv := httptest.NewServer(gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})))
+	defer srv.Close()
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	// Set explicitly: Go's transport strips a self-managed Accept-Encoding.
+	req.Header.Set("Accept-Encoding", "gzip")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", resp.StatusCode)
+	}
+	if enc := resp.Header.Get("Content-Encoding"); enc != "" {
+		t.Errorf("Content-Encoding = %q on a 204, want it removed", enc)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if len(body) != 0 {
+		t.Errorf("204 body = %q, want empty", body)
+	}
+	if strings.Contains(logs.String(), "gzip close failed") {
+		t.Errorf("204 response logged a gzip error: %s", logs.String())
+	}
+}
+
+// The normal path must keep working — a handler that never calls
+// WriteHeader (implicit 200) still has to get its body flushed.
+func TestGzipMiddleware_ImplicitOKStillCompresses(t *testing.T) {
+	handler := gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("implicit 200"))
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Header().Get("Content-Encoding") != "gzip" {
+		t.Fatal("expected Content-Encoding: gzip")
+	}
+	zr, err := gzip.NewReader(rr.Body)
+	if err != nil {
+		t.Fatalf("gzip.NewReader: %v", err)
+	}
+	defer func() { _ = zr.Close() }()
+	body, err := io.ReadAll(zr)
+	if err != nil {
+		t.Fatalf("io.ReadAll: %v", err)
+	}
+	if string(body) != "implicit 200" {
+		t.Errorf("decompressed body = %q, want %q", body, "implicit 200")
 	}
 }
 

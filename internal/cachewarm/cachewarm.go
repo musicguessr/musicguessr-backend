@@ -32,16 +32,26 @@ import (
 // cache first.
 type ResolveFunc func(ctx context.Context, spotifyID string) error
 
+// dropRetryAfter is how long a deck waits before it may be re-triggered
+// when its jobs were dropped because the queue was full. Much shorter than
+// rewarmAfter: nothing was actually warmed in that case, so holding the
+// deck back for the full rewarm window would leave it cold until tomorrow
+// purely because it arrived during a busy moment.
+const dropRetryAfter = 10 * time.Minute
+
 // Warmer runs a single-consumer, ticker-paced background queue.
 type Warmer struct {
-	resolve       ResolveFunc
-	pacing        time.Duration
-	jobTimeout    time.Duration
-	queue         chan string
-	stop          chan struct{}
-	stopOnce      sync.Once
-	warmedMu      sync.Mutex
-	warmed        map[string]time.Time
+	resolve    ResolveFunc
+	pacing     time.Duration
+	jobTimeout time.Duration
+	queue      chan string
+	stop       chan struct{}
+	stopOnce   sync.Once
+	warmedMu   sync.Mutex
+	// Maps deck ID to the earliest time it may be triggered again, rather
+	// than when it was last warmed — a deck whose jobs were dropped needs a
+	// much shorter cooldown than one that actually warmed (see dropRetryAfter).
+	nextAllowed   map[string]time.Time
 	rewarmAfter   time.Duration
 	queueCapacity int
 }
@@ -58,7 +68,7 @@ func New(resolve ResolveFunc, pacing, rewarmAfter time.Duration, queueCapacity i
 		jobTimeout:    20 * time.Second,
 		queue:         make(chan string, queueCapacity),
 		stop:          make(chan struct{}),
-		warmed:        make(map[string]time.Time),
+		nextAllowed:   make(map[string]time.Time),
 		rewarmAfter:   rewarmAfter,
 		queueCapacity: queueCapacity,
 	}
@@ -66,23 +76,50 @@ func New(resolve ResolveFunc, pacing, rewarmAfter time.Duration, queueCapacity i
 	return w
 }
 
+// ShouldWarm reports whether TriggerDeck would currently do any work for
+// this deck. Callers use it to avoid paying for the cards map when the
+// answer is no — building one means scanning the resolver's entire
+// card→track lookup (tens of thousands of entries) under its read lock, on
+// what is otherwise a hot request path, only for TriggerDeck to discard it.
+//
+// Advisory only: TriggerDeck re-checks under the lock, so two concurrent
+// requests that both see true still result in exactly one enqueue. The
+// loser just built a map for nothing — the same cost this gate removes in
+// the common case, not a new one.
+func (w *Warmer) ShouldWarm(deckID string) bool {
+	if deckID == "" {
+		return false
+	}
+	w.warmedMu.Lock()
+	defer w.warmedMu.Unlock()
+	return !w.onCooldownLocked(deckID)
+}
+
+func (w *Warmer) onCooldownLocked(deckID string) bool {
+	next, ok := w.nextAllowed[deckID]
+	return ok && time.Now().Before(next)
+}
+
 // TriggerDeck enqueues every card in this deck for background warming.
 // Cheap and safe to call on every /api/resolve request: a deck already
 // triggered within rewarmAfter is a no-op, and an already-warm card is a
 // near-instant cache hit when its job eventually runs. cards maps card
 // number to Spotify track ID (see Resolver.CardsInDeck) — empty Spotify IDs
-// are skipped.
+// are skipped. Prefer gating the call with ShouldWarm so the cards map is
+// only built when it can actually be used.
 func (w *Warmer) TriggerDeck(deckID string, cards map[string]string) {
 	if deckID == "" || len(cards) == 0 {
 		return
 	}
 
 	w.warmedMu.Lock()
-	if last, ok := w.warmed[deckID]; ok && time.Since(last) < w.rewarmAfter {
+	if w.onCooldownLocked(deckID) {
 		w.warmedMu.Unlock()
 		return
 	}
-	w.warmed[deckID] = time.Now()
+	// Claim the deck up front so concurrent requests don't all enqueue it;
+	// downgraded to dropRetryAfter below if the queue turns out to be full.
+	w.nextAllowed[deckID] = time.Now().Add(w.rewarmAfter)
 	w.warmedMu.Unlock()
 
 	queued := 0
@@ -95,9 +132,12 @@ func (w *Warmer) TriggerDeck(deckID string, cards map[string]string) {
 			queued++
 		default:
 			// Queue full — drop the rest rather than block the request that
-			// triggered this. The remaining cards still warm gradually from
-			// organic traffic (other scans, or this same deck triggering
-			// again once rewarmAfter elapses).
+			// triggered this. Nothing meaningful was warmed, so shorten the
+			// cooldown instead of holding this deck back for the full rewarm
+			// window over what is usually a transient burst.
+			w.warmedMu.Lock()
+			w.nextAllowed[deckID] = time.Now().Add(dropRetryAfter)
+			w.warmedMu.Unlock()
 			slog.Warn("cachewarm: queue full, dropping remaining jobs", "deck_id", deckID, "queued", queued)
 			return
 		}

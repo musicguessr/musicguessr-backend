@@ -162,6 +162,64 @@ func TestTriggerDeck_QueueFullDropsRatherThanBlocks(t *testing.T) {
 	}
 }
 
+func TestShouldWarm_GatesTriggerDeck(t *testing.T) {
+	w := New(func(context.Context, string) error { return nil }, time.Millisecond, time.Hour, 10)
+	t.Cleanup(w.Stop)
+
+	if !w.ShouldWarm("testdeck") {
+		t.Fatal("ShouldWarm on an untouched deck = false, want true")
+	}
+	if w.ShouldWarm("") {
+		t.Error("ShouldWarm on an empty deck id = true, want false")
+	}
+
+	w.TriggerDeck("testdeck", map[string]string{"00001": "sp1"})
+
+	if w.ShouldWarm("testdeck") {
+		t.Error("ShouldWarm right after a successful trigger = true, want false (still on cooldown)")
+	}
+	if !w.ShouldWarm("otherdeck") {
+		t.Error("ShouldWarm on a different, untriggered deck = false, want true")
+	}
+}
+
+// A deck whose jobs were all dropped was never actually warmed, so it must
+// not sit out the full rewarm window — otherwise one busy moment leaves it
+// cold for the rest of the day.
+func TestTriggerDeck_QueueFullUsesShortCooldown(t *testing.T) {
+	block := make(chan struct{})
+	resolve := func(_ context.Context, _ string) error {
+		<-block
+		return nil
+	}
+
+	rewarmAfter := time.Hour
+	w := New(resolve, time.Millisecond, rewarmAfter, 1)
+	t.Cleanup(func() {
+		close(block)
+		w.Stop()
+	})
+
+	w.TriggerDeck("testdeck", map[string]string{
+		"00001": "sp1",
+		"00002": "sp2",
+		"00003": "sp3",
+	})
+
+	w.warmedMu.Lock()
+	next, ok := w.nextAllowed["testdeck"]
+	w.warmedMu.Unlock()
+	if !ok {
+		t.Fatal("deck was not recorded at all after a queue-full drop")
+	}
+
+	cooldown := time.Until(next)
+	if cooldown > dropRetryAfter+time.Minute {
+		t.Errorf("cooldown after a dropped deck = %v, want ~%v (not the full %v rewarm window)",
+			cooldown, dropRetryAfter, rewarmAfter)
+	}
+}
+
 func TestStop_IsSafeToCallMultipleTimes(t *testing.T) {
 	w := New(func(context.Context, string) error { return nil }, time.Millisecond, time.Hour, 10)
 	w.Stop()
