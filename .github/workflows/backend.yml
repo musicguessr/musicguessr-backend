@@ -23,6 +23,18 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+      # gofmt is not among golangci-lint's default linters, so formatting
+      # drift went unnoticed until someone happened to run gofmt locally.
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-formatted. Run: gofmt -w ."
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
       - uses: golangci/golangci-lint-action@v9
 
   test:
