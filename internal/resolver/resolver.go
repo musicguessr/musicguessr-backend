@@ -26,9 +26,15 @@ var resolverHTTPClient = &http.Client{
 const maxGamesetBodySize = 32 << 20 // 32 MB
 
 const (
-	assetsBase   = "https://stgroupprdhitster.blob.core.windows.net/hitster-assets"
+	// hitster.jumboplay.com is Hitster/Jumbo's actual production asset host
+	// (backed by Azure Blob storage, same as the alternative below) and is
+	// kept current — as of writing, 52 gamesets and ~14,000 cards ahead of
+	// stgroupprdhitster.blob.core.windows.net, which turned out to have
+	// gone stale (10 months without an update) despite looking like the
+	// "official" host. Confirmed via a manual diff against a copy from
+	// github.com/joschkarick/hitster-deezer while investigating that repo.
+	assetsBase   = "https://hitster.jumboplay.com/hitster-assets"
 	gamesetDB    = assetsBase + "/gameset_database.json"
-	timestampURL = assetsBase + "/gamedata_timestamp.json"
 	refreshEvery = time.Hour
 )
 
@@ -138,8 +144,14 @@ func (r *Resolver) Resolve(rawURL string) (string, error) {
 	return id, nil
 }
 
+// load fetches and parses the full gameset database, applying it only if
+// its own embedded updated_on timestamp differs from what's already
+// loaded. jumboplay.com (unlike the stale host this used to point at) has
+// no separate lightweight timestamp endpoint to cheaply poll first, so
+// every refreshEvery tick now costs one full ~5MB fetch+parse regardless —
+// entirely fine for an hourly check, and simpler than depending on a
+// second endpoint that may not exist on every host this could point at.
 func (r *Resolver) load() error {
-	slog.Info("loading gameset database")
 	resp, err := resolverHTTPClient.Get(gamesetDB)
 	if err != nil {
 		return err
@@ -156,7 +168,15 @@ func (r *Resolver) load() error {
 	if err := json.Unmarshal(body, &db); err != nil {
 		return err
 	}
-	lookup := make(map[string]string, 12000)
+
+	r.mu.RLock()
+	current := r.timestamp
+	r.mu.RUnlock()
+	if current != 0 && db.UpdatedOn == current {
+		return nil
+	}
+
+	lookup := make(map[string]string, 50000)
 	for _, gs := range db.Gamesets {
 		sku := strings.ToLower(gs.SKU)
 		for _, c := range gs.Data.Cards {
@@ -167,7 +187,7 @@ func (r *Resolver) load() error {
 	r.lookup = lookup
 	r.timestamp = db.UpdatedOn
 	r.mu.Unlock()
-	slog.Info("gameset database loaded", "cards", len(lookup), "gamesets", len(db.Gamesets))
+	slog.Info("gameset database loaded", "cards", len(lookup), "gamesets", len(db.Gamesets), "updated_on", db.UpdatedOn)
 	return nil
 }
 
@@ -175,39 +195,10 @@ func (r *Resolver) refreshLoop() {
 	ticker := time.NewTicker(refreshEvery)
 	defer ticker.Stop()
 	for range ticker.C {
-		ts, err := fetchTimestamp()
-		if err != nil {
-			slog.Warn("timestamp check failed", "err", err)
-			continue
-		}
-		r.mu.RLock()
-		current := r.timestamp
-		r.mu.RUnlock()
-		if ts != current {
-			slog.Info("database changed, reloading", "old", current, "new", ts)
-			if err := r.load(); err != nil {
-				slog.Error("reload failed", "err", err)
-			}
+		if err := r.load(); err != nil {
+			slog.Error("reload failed", "err", err)
 		}
 	}
-}
-
-func fetchTimestamp() (int64, error) {
-	resp, err := resolverHTTPClient.Get(timestampURL)
-	if err != nil {
-		return 0, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("timestamp endpoint returned %d", resp.StatusCode)
-	}
-	var v struct {
-		Timestamp int64 `json:"timestamp"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
-		return 0, err
-	}
-	return v.Timestamp, nil
 }
 
 func SpotifyURL(id string) string {
