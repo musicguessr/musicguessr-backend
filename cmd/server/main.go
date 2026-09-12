@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/musicguessr/musicguessr-backend/internal/axiomlog"
 	"github.com/musicguessr/musicguessr-backend/internal/deck"
 	"github.com/musicguessr/musicguessr-backend/internal/deckstore"
 	"github.com/musicguessr/musicguessr-backend/internal/itunes"
@@ -263,8 +264,24 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func main() {
+	level := slog.LevelInfo
 	if os.Getenv("LOG_LEVEL") == "debug" {
-		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		level = slog.LevelDebug
+	}
+
+	// Optional external log shipping (see internal/axiomlog) — nil when
+	// AXIOM_TOKEN/AXIOM_DATASET aren't set, in which case logging is
+	// unchanged from before (stderr only, picked up by journalctl on the
+	// Pi). JSON rather than the previous plain-text format so a shipped
+	// line and a locally-grepped line are the exact same structured record.
+	axiomWriter := axiomlog.New()
+	logDest := io.Writer(os.Stderr)
+	if axiomWriter != nil {
+		logDest = io.MultiWriter(os.Stderr, axiomWriter)
+	}
+	slog.SetDefault(slog.New(slog.NewJSONHandler(logDest, &slog.HandlerOptions{Level: level})))
+	if axiomWriter != nil {
+		slog.Info("axiom log shipping enabled")
 	}
 
 	port := os.Getenv("PORT")
@@ -538,6 +555,11 @@ func main() {
 	if err := srv.Shutdown(ctx); err != nil {
 		slog.Error("graceful shutdown failed", "err", err)
 		os.Exit(1)
+	}
+	if axiomWriter != nil {
+		// Flushes whatever's still buffered (e.g. this shutdown sequence's
+		// own log lines) before the process actually exits.
+		axiomWriter.Close()
 	}
 }
 

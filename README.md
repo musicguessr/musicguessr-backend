@@ -36,6 +36,16 @@ go run ./cmd/server
 | `PORT` | `8080` | TCP port the HTTP server listens on |
 | `LOG_LEVEL` | _(unset)_ | Set to `debug` to enable verbose structured logging |
 
+### External log shipping (`internal/axiomlog`)
+
+Optional. Every structured log line is JSON (`log/slog` with `slog.NewJSONHandler`) and, when configured, an async copy is shipped to [Axiom](https://axiom.co) so a production issue is searchable there instead of requiring shell access to wherever this is deployed. Local logging (stderr/journalctl) is unaffected either way.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AXIOM_TOKEN` | _(unset — disabled)_ | API token, scoped to the dataset below. Create both at [app.axiom.co](https://app.axiom.co) — free tier is 500GB/month ingest, no credit card required. |
+| `AXIOM_DATASET` | _(unset — disabled)_ | Name of the Axiom dataset to ingest into. |
+| `AXIOM_ORG_ID` | _(unset)_ | Only needed for older org-scoped API tokens; leave unset for a normal dataset-scoped token. |
+
 ### YouTube
 
 YouTube search/metadata/playlist lookups shell out to `yt-dlp` (see `internal/youtube/ytdlp.go`) — no configuration required, but the `python3.13` interpreter and the `yt-dlp` package (installed via `PYTHONPATH`, see the Dockerfile) must be present on `PATH`.
