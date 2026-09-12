@@ -119,12 +119,16 @@ func New() *Resolver {
 	return r
 }
 
-func (r *Resolver) Resolve(rawURL string) (string, error) {
+// Resolve returns the Spotify track ID for a scanned QR URL, plus the
+// normalized deck ID it belongs to — callers use the latter with
+// CardsInDeck to warm the rest of that deck's cache in the background (see
+// internal/cachewarm) without needing to re-parse the URL themselves.
+func (r *Resolver) Resolve(rawURL string) (spotifyID, deckID string, err error) {
 	rawDeckID, rawCardID, err := parseHitsterURL(rawURL)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	deckID := strings.ToLower(rawDeckID)
+	deckID = strings.ToLower(rawDeckID)
 	cardID := rawCardID
 	if n, err := strconv.Atoi(rawCardID); err == nil {
 		cardID = fmt.Sprintf("%05d", n)
@@ -139,9 +143,26 @@ func (r *Resolver) Resolve(rawURL string) (string, error) {
 	defer r.mu.RUnlock()
 	id, ok := r.lookup[key]
 	if !ok {
-		return "", fmt.Errorf("card not found: deck=%s card=%s", deckID, cardID)
+		return "", "", fmt.Errorf("card not found: deck=%s card=%s", deckID, cardID)
 	}
-	return id, nil
+	return id, deckID, nil
+}
+
+// CardsInDeck returns every card number known for the given (already
+// normalized, lowercase) deck ID, mapped to its resolved Spotify track ID.
+// Used to enumerate the rest of a deck for background cache warming once
+// one of its cards has been scanned — see internal/cachewarm.
+func (r *Resolver) CardsInDeck(deckID string) map[string]string {
+	prefix := deckID + ":"
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make(map[string]string, 20)
+	for key, spotifyID := range r.lookup {
+		if cardID, ok := strings.CutPrefix(key, prefix); ok {
+			out[cardID] = spotifyID
+		}
+	}
+	return out
 }
 
 // load fetches and parses the full gameset database, applying it only if

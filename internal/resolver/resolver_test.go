@@ -5,6 +5,33 @@ import (
 	"testing"
 )
 
+func TestCardsInDeck(t *testing.T) {
+	r := &Resolver{lookup: map[string]string{
+		"testdeck:00001":  "spotify_a",
+		"testdeck:00002":  "spotify_b",
+		"otherdeck:00001": "spotify_c",
+	}}
+
+	got := r.CardsInDeck("testdeck")
+	want := map[string]string{"00001": "spotify_a", "00002": "spotify_b"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("got[%q] = %q, want %q", k, got[k], v)
+		}
+	}
+}
+
+func TestCardsInDeck_UnknownDeckReturnsEmpty(t *testing.T) {
+	r := &Resolver{lookup: map[string]string{"testdeck:00001": "spotify_a"}}
+	got := r.CardsInDeck("nosuchdeck")
+	if len(got) != 0 {
+		t.Fatalf("got %v, want empty map", got)
+	}
+}
+
 func TestSpotifyURL(t *testing.T) {
 	got := SpotifyURL("abc123")
 	want := "https://open.spotify.com/track/abc123"
@@ -110,7 +137,7 @@ func TestResolve(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := r.Resolve(tc.url)
+			got, _, err := r.Resolve(tc.url)
 			if tc.wantErr {
 				if err == nil {
 					t.Errorf("expected error, got %q", got)

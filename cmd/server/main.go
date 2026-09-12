@@ -4,6 +4,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"html"
 	"io"
 	"log/slog"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/musicguessr/musicguessr-backend/internal/axiomlog"
+	"github.com/musicguessr/musicguessr-backend/internal/cachewarm"
 	"github.com/musicguessr/musicguessr-backend/internal/deck"
 	"github.com/musicguessr/musicguessr-backend/internal/deckstore"
 	"github.com/musicguessr/musicguessr-backend/internal/itunes"
@@ -333,6 +335,32 @@ func main() {
 		spotifyapi.SetCache(spotifyCacheAdapter{c: resolveCache})
 	}
 
+	// Background deck-cache warmer (see internal/cachewarm) — runs the same
+	// metadata/YouTube/Spotify pipeline as a live resolve, just paced slowly
+	// and triggered for a whole deck once any one of its cards is scanned.
+	warmResolve := func(ctx context.Context, spotifyID string) error {
+		artist, title := fetchSpotifyMeta(ctx, httpClient, spotifyID)
+		if artist == "" && title == "" {
+			return errors.New("no spotify metadata for track")
+		}
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = youtube.SearchVideoID(ctx, artist, title, true)
+		}()
+		_, _ = metadata.Resolve(ctx, artist, title)
+		wg.Wait()
+		if spotifyClient != nil {
+			_, _ = spotifyClient.GetTrack(ctx, spotifyID)
+		}
+		return nil
+	}
+	// ~1 card every 6s keeps this well under any provider's own rate limits
+	// even for a large deck; 24h dedup means a deck already warmed today
+	// won't re-trigger on every subsequent scan from it.
+	warmer := cachewarm.New(warmResolve, 6*time.Second, 24*time.Hour, 2000)
+
 	// Both endpoints groups are public with no auth, so they're the surface
 	// most exposed to abuse (scripted scraping, or someone hammering the
 	// yt-dlp subprocess path). Limits are per-IP and generous enough for
@@ -407,12 +435,18 @@ func main() {
 		defer cancel()
 		r = r.WithContext(ctx)
 
-		spotifyID, err := res.Resolve(qrURL)
+		spotifyID, deckID, err := res.Resolve(qrURL)
 		if err != nil {
 			slog.Warn("resolve: card not found", "request_id", reqID, "session_id", sessionID, "url", qrURL, "err", err)
 			writeJSON(w, http.StatusNotFound, errResponse{err.Error()})
 			return
 		}
+		// Best-effort: warm the rest of this deck's cache in the background
+		// now that we know someone's actively playing it — see
+		// internal/cachewarm. Paced slowly and deduped per-deck, so this
+		// never adds request volume anywhere close to what would risk a
+		// rate limit/ban from a provider.
+		warmer.TriggerDeck(deckID, res.CardsInDeck(deckID))
 
 		resp := resolveResponse{
 			SpotifyID:  spotifyID,
@@ -558,6 +592,7 @@ func main() {
 	<-stop
 	slog.Info("shutdown signal received, shutting down server")
 	close(stopCleanup)
+	warmer.Stop()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
