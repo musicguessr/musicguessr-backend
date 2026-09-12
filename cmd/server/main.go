@@ -164,6 +164,56 @@ func clientIP(r *http.Request) string {
 	return r.RemoteAddr
 }
 
+type clientErrorRequest struct {
+	Message   string `json:"message"`
+	Stack     string `json:"stack,omitempty"`
+	URL       string `json:"url,omitempty"`
+	UserAgent string `json:"user_agent,omitempty"`
+	// Free-form tag identifying which client-side code path reported this
+	// (e.g. "global-error-handler", "scanner-timeout") — lets log queries
+	// filter by source without parsing message text.
+	Context string `json:"context,omitempty"`
+}
+
+// clientErrorFieldLimit caps each field's logged length — the request body
+// itself is already bounded by MaxBytesReader below, but a single
+// pathologically long field (a minified stack trace, say) shouldn't be
+// allowed to dominate a log line on its own.
+const clientErrorFieldLimit = 2000
+
+func truncateField(s string) string {
+	if len(s) > clientErrorFieldLimit {
+		return s[:clientErrorFieldLimit] + "…(truncated)"
+	}
+	return s
+}
+
+// handleClientError logs a best-effort report of a client-only failure —
+// see the /api/client-error registration above for why this exists. It
+// never fails loudly: a malformed body just gets a 204, since the frontend
+// sends these fire-and-forget and has nothing useful to do with an error
+// response for its own error-reporting call.
+func handleClientError(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 8<<10) // 8 KB
+
+	var req clientErrorRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err == nil && req.Message != "" {
+		slog.Warn("client error report",
+			"context", truncateField(req.Context),
+			"message", truncateField(req.Message),
+			"stack", truncateField(req.Stack),
+			"url", truncateField(req.URL),
+			"user_agent", truncateField(req.UserAgent),
+			"ip", clientIP(r),
+		)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // rateLimited wraps a handler with a per-IP token-bucket check. Applied
 // selectively to the expensive/abusable endpoints (metadata+yt-dlp fan-out,
 // deck creation/import) rather than globally — /health and static asset
@@ -261,9 +311,14 @@ func main() {
 	// per call.
 	resolveLimiter := ratelimit.New(0.5, 15, 10*time.Minute) // ~30/min sustained, burst 15
 	deckLimiter := ratelimit.New(0.1, 3, 10*time.Minute)     // ~6/min sustained, burst 3
+	// Client-error reports are small and infrequent by nature (a handful per
+	// real session at most) — this exists to catch someone trying to use the
+	// endpoint as a free-form log-spam sink, not to throttle real usage.
+	clientErrorLimiter := ratelimit.New(0.2, 5, 10*time.Minute) // ~12/min sustained, burst 5
 	stopCleanup := make(chan struct{})
 	resolveLimiter.StartCleanup(5*time.Minute, stopCleanup)
 	deckLimiter.StartCleanup(5*time.Minute, stopCleanup)
+	clientErrorLimiter.StartCleanup(5*time.Minute, stopCleanup)
 
 	// Expired decks are never deleted otherwise (deckstore has no TTL of its
 	// own) — an hourly sweep is frequent enough that storage never grows far
@@ -285,6 +340,14 @@ func main() {
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+
+	// A no-cost stand-in for a real error-tracking service (Sentry etc.):
+	// the frontend has no way to surface client-only failures (e.g. QR
+	// detection silently failing on a hardened/privacy browser — nothing
+	// ever reaches /api/resolve in that case) anywhere we can see, so this
+	// gives it somewhere to report them to. Logged only, no storage/alerting
+	// beyond that — deliberately minimal.
+	mux.HandleFunc("/api/client-error", rateLimited(clientErrorLimiter, handleClientError))
 
 	mux.HandleFunc("/api/resolve", rateLimited(resolveLimiter, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"compress/gzip"
 	"io"
 	"net/http"
@@ -159,4 +160,77 @@ func TestHealthHandler(t *testing.T) {
 			t.Errorf("got %d, want %d", rr.Code, http.StatusMethodNotAllowed)
 		}
 	})
+}
+
+func TestHandleClientError(t *testing.T) {
+	t.Run("valid report returns 204", func(t *testing.T) {
+		body := `{"message":"boom","context":"scanner-timeout"}`
+		req := httptest.NewRequest(http.MethodPost, "/api/client-error", strings.NewReader(body))
+		rr := httptest.NewRecorder()
+		handleClientError(rr, req)
+
+		if rr.Code != http.StatusNoContent {
+			t.Errorf("got %d, want %d", rr.Code, http.StatusNoContent)
+		}
+	})
+
+	t.Run("empty message still returns 204 without panicking", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/client-error", strings.NewReader(`{}`))
+		rr := httptest.NewRecorder()
+		handleClientError(rr, req)
+
+		if rr.Code != http.StatusNoContent {
+			t.Errorf("got %d, want %d", rr.Code, http.StatusNoContent)
+		}
+	})
+
+	t.Run("malformed JSON still returns 204, never an error to the reporter", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/client-error", strings.NewReader(`not json`))
+		rr := httptest.NewRecorder()
+		handleClientError(rr, req)
+
+		if rr.Code != http.StatusNoContent {
+			t.Errorf("got %d, want %d", rr.Code, http.StatusNoContent)
+		}
+	})
+
+	t.Run("oversized body is rejected, not read into memory unbounded", func(t *testing.T) {
+		huge := bytes.Repeat([]byte("a"), 20<<10)
+		body := `{"message":"` + string(huge) + `"}`
+		req := httptest.NewRequest(http.MethodPost, "/api/client-error", strings.NewReader(body))
+		rr := httptest.NewRecorder()
+		handleClientError(rr, req)
+
+		// MaxBytesReader makes json.Decode fail once the 8KB cap is hit —
+		// handleClientError treats that the same as any other malformed body.
+		if rr.Code != http.StatusNoContent {
+			t.Errorf("got %d, want %d", rr.Code, http.StatusNoContent)
+		}
+	})
+
+	t.Run("GET returns 405", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/client-error", nil)
+		rr := httptest.NewRecorder()
+		handleClientError(rr, req)
+
+		if rr.Code != http.StatusMethodNotAllowed {
+			t.Errorf("got %d, want %d", rr.Code, http.StatusMethodNotAllowed)
+		}
+	})
+}
+
+func TestTruncateField(t *testing.T) {
+	short := "hello"
+	if got := truncateField(short); got != short {
+		t.Errorf("got %q, want unchanged %q", got, short)
+	}
+
+	long := strings.Repeat("x", clientErrorFieldLimit+500)
+	got := truncateField(long)
+	if len(got) <= clientErrorFieldLimit {
+		t.Errorf("expected truncation marker appended, got length %d", len(got))
+	}
+	if !strings.HasSuffix(got, "…(truncated)") {
+		t.Errorf("got %q, want a truncation suffix", got[len(got)-20:])
+	}
 }
