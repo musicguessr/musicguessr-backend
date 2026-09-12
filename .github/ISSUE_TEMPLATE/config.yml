@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Frequently Asked Questions
+    url: https://musicguessr.app/faq
+    about: Check here first — your question might already be answered.
+  - name: Web app / scanning / playback issue
+    url: https://github.com/musicguessr/musicguessr-frontend/issues/new/choose
+    about: If this is about the app itself (camera scanning, playback, UI) rather than the resolve API or metadata.

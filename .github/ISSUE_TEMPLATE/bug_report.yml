@@ -1,0 +1,82 @@
+name: Bug report
+description: Something isn't working — wrong/missing metadata, resolve failures, deck storage, or the API itself.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this — the more detail here, the faster we can actually find and fix it.
+
+        If this is about the **web app itself** (scanning, playback, UI) rather than the resolve API or metadata,
+        [the frontend repo](https://github.com/musicguessr/musicguessr-frontend/issues/new/choose) is probably a
+        better fit — but if you're not sure, this is fine too.
+
+        **A note on privacy:** please don't attach photos of physical Hitster cards. We only need the
+        *deck/language and card number* printed on the card (plain facts, not the card's artwork) — see the field
+        below. Nothing else here is sensitive; the request ID is just a debugging breadcrumb.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What went wrong, in your own words.
+      placeholder: e.g. "The year shown for this card doesn't match what's printed on it."
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: What did you do, in order, right before this happened? Include the exact /api/resolve URL if you have it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen instead?
+    validations:
+      required: false
+
+  - type: input
+    id: request-id
+    attributes:
+      label: Request ID (if you have one)
+      description: >
+        Every /api/resolve response includes a "request_id" field (and an X-Request-Id response header) — if you
+        have it, paste it here. It lets us jump straight to the matching server-side logs instead of searching by
+        approximate time.
+      placeholder: e.g. 3f2a1b9c8d7e6f50
+    validations:
+      required: false
+
+  - type: input
+    id: deck
+    attributes:
+      label: Hitster deck/edition and language (if this is about a specific card)
+      description: >
+        The language and deck SKU from the card's QR code URL, e.g. "de" and the number after it —
+        not a photo of the card, just these two identifiers plus the card number below.
+      placeholder: e.g. DE standard edition
+    validations:
+      required: false
+
+  - type: input
+    id: card-number
+    attributes:
+      label: Card number(s) affected (if applicable)
+      placeholder: e.g. 42, 87, 103
+    validations:
+      required: false
+
+  - type: textarea
+    id: response
+    attributes:
+      label: API response / server error (optional)
+      description: >
+        If you called /api/resolve directly (or copied it from your browser's devtools Network tab), paste the
+        JSON response or status code here.
+      render: json
+    validations:
+      required: false

@@ -22,6 +22,7 @@ import (
 	"github.com/musicguessr/musicguessr-backend/internal/metadata"
 	"github.com/musicguessr/musicguessr-backend/internal/ratelimit"
 	"github.com/musicguessr/musicguessr-backend/internal/rcache"
+	"github.com/musicguessr/musicguessr-backend/internal/requestid"
 	"github.com/musicguessr/musicguessr-backend/internal/resolver"
 	"github.com/musicguessr/musicguessr-backend/internal/spotifyapi"
 	"github.com/musicguessr/musicguessr-backend/internal/youtube"
@@ -137,6 +138,10 @@ type resolveResponse struct {
 	Explicit       bool              `json:"explicit,omitempty"`
 	YouTubeVideoID string            `json:"youtube_video_id,omitempty"`
 	Links          map[string]string `json:"links"`
+	// RequestID lets a user hand over one short string in a bug report that
+	// a maintainer can grep straight to this request's server-side logs —
+	// see internal/requestid.
+	RequestID string `json:"request_id,omitempty"`
 }
 
 type errResponse struct {
@@ -173,6 +178,11 @@ type clientErrorRequest struct {
 	// (e.g. "global-error-handler", "scanner-timeout") — lets log queries
 	// filter by source without parsing message text.
 	Context string `json:"context,omitempty"`
+	// RequestID, when the report relates to a specific earlier /api/resolve
+	// call (e.g. a YouTube-blocked report for the card that call resolved),
+	// ties this report back to that request's own "resolve request" log
+	// line — see internal/requestid.
+	RequestID string `json:"request_id,omitempty"`
 }
 
 // clientErrorFieldLimit caps each field's logged length — the request body
@@ -209,6 +219,8 @@ func handleClientError(w http.ResponseWriter, r *http.Request) {
 			"url", truncateField(req.URL),
 			"user_agent", truncateField(req.UserAgent),
 			"ip", clientIP(r),
+			"resolve_request_id", truncateField(req.RequestID),
+			"request_id", requestid.FromContext(r.Context()),
 		)
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -359,6 +371,7 @@ func main() {
 			writeJSON(w, http.StatusBadRequest, errResponse{"missing url parameter"})
 			return
 		}
+		reqID := requestid.FromContext(r.Context())
 
 		// Spotify fetch (8s) + metadata.Resolve (6s) + youtube.SearchVideoID
 		// (up to two sequential yt-dlp passes, 20s each when uncapped) can
@@ -371,6 +384,7 @@ func main() {
 
 		spotifyID, err := res.Resolve(qrURL)
 		if err != nil {
+			slog.Warn("resolve: card not found", "request_id", reqID, "url", qrURL, "err", err)
 			writeJSON(w, http.StatusNotFound, errResponse{err.Error()})
 			return
 		}
@@ -379,6 +393,7 @@ func main() {
 			SpotifyID:  spotifyID,
 			SpotifyURL: resolver.SpotifyURL(spotifyID),
 			Links:      make(map[string]string),
+			RequestID:  reqID,
 		}
 
 		// Enrich: Spotify oEmbed → artist/title
@@ -472,10 +487,16 @@ func main() {
 			if ytErr == nil {
 				resp.YouTubeVideoID = ytVideoID
 			} else {
-				slog.Warn("youtube search failed", "artist", artist, "title", title, "err", ytErr)
+				slog.Warn("youtube search failed", "artist", artist, "title", title, "err", ytErr, "request_id", reqID)
 			}
 		}
 		resp.Links["spotify"] = resp.SpotifyURL
+
+		// Anchor log line for this request — a user reporting request_id
+		// alongside a bug gets a maintainer straight to exactly what this
+		// request resolved to (nearby WARN lines above, if any, then explain
+		// why), rather than having to correlate by approximate timestamp.
+		slog.Info("resolve request", "request_id", reqID, "spotify_id", spotifyID, "artist", resp.Artist, "title", resp.Title, "year", resp.Year)
 
 		writeJSON(w, http.StatusOK, resp)
 	}))
@@ -484,8 +505,10 @@ func main() {
 	// preflight's empty 204 response (written by cors, never reaching gzip's
 	// body writer) still gets Content-Encoding: gzip/Vary headers set by
 	// gzipMiddleware before cors ever runs, and gz.Close()'s trailer write
-	// fails against the already-204'd ResponseWriter.
-	handler := cors(gzipMiddleware(mux))
+	// fails against the already-204'd ResponseWriter. requestid wraps
+	// everything else so the ID exists (and its response header is set)
+	// before any of them run, including on the OPTIONS/CORS-only path.
+	handler := requestid.Middleware(cors(gzipMiddleware(mux)))
 	srv := &http.Server{
 		Addr:              ":" + port,
 		Handler:           handler,
