@@ -222,6 +222,7 @@ func handleClientError(w http.ResponseWriter, r *http.Request) {
 			"ip", clientIP(r),
 			"resolve_request_id", truncateField(req.RequestID),
 			"request_id", requestid.FromContext(r.Context()),
+			"session_id", truncateField(r.Header.Get("X-Session-Id")),
 		)
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -246,7 +247,7 @@ func cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Session-Id")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -389,6 +390,13 @@ func main() {
 			return
 		}
 		reqID := requestid.FromContext(r.Context())
+		// Client-generated, in-memory-only for the lifetime of one browser
+		// tab (see SessionIdService on the frontend) — lets logs correlate
+		// multiple actions within a single visit (e.g. a scanner timeout
+		// followed by this resolve) without the backend ever persisting an
+		// identifier across visits, which would be tracking in the sense
+		// this app's FAQ explicitly promises it doesn't do.
+		sessionID := truncateField(r.Header.Get("X-Session-Id"))
 
 		// Spotify fetch (8s) + metadata.Resolve (6s) + youtube.SearchVideoID
 		// (up to two sequential yt-dlp passes, 20s each when uncapped) can
@@ -401,7 +409,7 @@ func main() {
 
 		spotifyID, err := res.Resolve(qrURL)
 		if err != nil {
-			slog.Warn("resolve: card not found", "request_id", reqID, "url", qrURL, "err", err)
+			slog.Warn("resolve: card not found", "request_id", reqID, "session_id", sessionID, "url", qrURL, "err", err)
 			writeJSON(w, http.StatusNotFound, errResponse{err.Error()})
 			return
 		}
@@ -513,7 +521,7 @@ func main() {
 		// alongside a bug gets a maintainer straight to exactly what this
 		// request resolved to (nearby WARN lines above, if any, then explain
 		// why), rather than having to correlate by approximate timestamp.
-		slog.Info("resolve request", "request_id", reqID, "spotify_id", spotifyID, "artist", resp.Artist, "title", resp.Title, "year", resp.Year)
+		slog.Info("resolve request", "request_id", reqID, "session_id", sessionID, "spotify_id", spotifyID, "artist", resp.Artist, "title", resp.Title, "year", resp.Year)
 
 		writeJSON(w, http.StatusOK, resp)
 	}))
