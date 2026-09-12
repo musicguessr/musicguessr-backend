@@ -87,15 +87,19 @@ func (c *Cache) Enabled() bool {
 }
 
 // cacheKey derives a storage-safe key from a namespace (e.g. "youtube",
-// "metadata") and an arbitrary caller-supplied string (artist/title, a
-// deck/card ID, ...) which may contain spaces, slashes or unicode — none of
-// which are safe to use directly as a Valkey key, an S3 object path segment,
-// or (deckstore's local backend) a filesystem path/os.CreateTemp pattern —
-// so it's hashed. "-" rather than "/" separates namespace from hash so the
-// local backend never needs a pre-existing subdirectory for it.
+// "metadata", "spotify-track") and an arbitrary caller-supplied string
+// (artist/title, a Spotify track ID, ...) which may contain spaces, slashes
+// or unicode — none of which are safe to use directly as a Valkey key or an
+// S3 object path segment — so it's hashed. "/" separates namespace from
+// hash so each namespace lands in its own S3 "folder" (a plain key prefix —
+// S3 has no real directories, but consoles/tools group by it) instead of
+// every entry from every namespace sitting flat in one bucket. deckstore's
+// local backend (only reachable here if RESOLVE_CACHE_PROVIDER=local is set
+// explicitly — the default is S3-only or disabled) creates the namespace
+// subdirectory on demand, so this is safe there too.
 func cacheKey(namespace, key string) string {
 	sum := sha256.Sum256([]byte(key))
-	return namespace + "-" + hex.EncodeToString(sum[:])
+	return namespace + "/" + hex.EncodeToString(sum[:])
 }
 
 // GetJSON looks up namespace/key, trying Valkey first, then S3 (backfilling

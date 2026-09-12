@@ -21,12 +21,19 @@ func newLocal(dir string) (*localStore, error) {
 
 func (s *localStore) Put(_ context.Context, id string, data []byte) error {
 	dest := filepath.Join(s.dir, id+".json")
+	// id may contain "/" (rcache namespaces its keys this way, e.g.
+	// "metadata/<hash>", to mirror the folder-like prefixes used on the S3
+	// tier) — the parent directory isn't guaranteed to exist yet.
+	destDir := filepath.Dir(dest)
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		return fmt.Errorf("deckstore/local: mkdir %s: %w", destDir, err)
+	}
 	// Write to a temp file in the same directory (so the rename is on the same
 	// filesystem, and therefore atomic) then rename over the destination.
 	// os.WriteFile truncates in place; a process kill/crash mid-write would
 	// otherwise leave a permanently corrupted, unrecoverable deck file, since
 	// decks are immutable and Put is never retried for the same id.
-	tmp, err := os.CreateTemp(s.dir, id+".*.tmp")
+	tmp, err := os.CreateTemp(destDir, filepath.Base(id)+".*.tmp")
 	if err != nil {
 		return fmt.Errorf("deckstore/local: create temp file: %w", err)
 	}
@@ -67,6 +74,10 @@ func (s *localStore) Delete(_ context.Context, id string) error {
 	return nil
 }
 
+// List is intentionally non-recursive (deck IDs, the only thing it's
+// actually used for — see deck.CleanupExpired — are never nested/namespaced
+// like rcache's keys can be). A namespaced id written via Put would not be
+// found by List as it stands.
 func (s *localStore) List(_ context.Context) ([]string, error) {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {

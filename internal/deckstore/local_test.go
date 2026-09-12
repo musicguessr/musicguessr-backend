@@ -59,3 +59,41 @@ func TestLocalStore_PutGetDeleteList(t *testing.T) {
 		t.Fatalf("List after Delete returned %v", ids)
 	}
 }
+
+func TestLocalStore_PutGetDelete_NamespacedID(t *testing.T) {
+	// rcache keys look like "metadata/<hash>" — the namespace subdirectory
+	// doesn't exist ahead of time and must be created on demand.
+	dir := t.TempDir()
+	s, err := newLocal(dir)
+	if err != nil {
+		t.Fatalf("newLocal: %v", err)
+	}
+	ctx := context.Background()
+
+	id := "metadata/abc123hash"
+	if err := s.Put(ctx, id, []byte(`{"artist":"Test"}`)); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	data, err := s.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if string(data) != `{"artist":"Test"}` {
+		t.Fatalf("Get returned %q", data)
+	}
+
+	// A second key under the same namespace must work too — the mkdir isn't
+	// a one-shot fluke tied to the first write.
+	id2 := "metadata/def456hash"
+	if err := s.Put(ctx, id2, []byte(`{"artist":"Other"}`)); err != nil {
+		t.Fatalf("Put second namespaced id: %v", err)
+	}
+
+	if err := s.Delete(ctx, id); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := s.Get(ctx, id); err != ErrNotFound {
+		t.Fatalf("Get after Delete: got err %v, want ErrNotFound", err)
+	}
+}
