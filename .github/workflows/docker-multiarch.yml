@@ -29,6 +29,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # No "now" expression exists in Actions context syntax — this is the
+      # standard way to get an actual build timestamp into a later step.
+      - name: Set build date
+        id: build_date
+        run: echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
       - name: Build and push multi-arch image
         uses: docker/build-push-action@v7
         with:
@@ -39,5 +45,8 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository_owner }}/musicguessr-backend:latest
             ghcr.io/${{ github.repository_owner }}/musicguessr-backend:${{ github.sha }}
+          build-args: |
+            GIT_COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ steps.build_date.outputs.date }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

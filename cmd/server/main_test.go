@@ -208,10 +208,14 @@ func TestHealthHandler(t *testing.T) {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status":     "ok",
+			"commit":     gitCommit,
+			"build_date": buildDate,
+		})
 	})
 
-	t.Run("GET returns 200 with status ok", func(t *testing.T) {
+	t.Run("GET returns 200 with status, commit, and build_date", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/health", nil)
 		rr := httptest.NewRecorder()
 		mux.ServeHTTP(rr, req)
@@ -221,6 +225,9 @@ func TestHealthHandler(t *testing.T) {
 		}
 		if !strings.Contains(rr.Body.String(), `"ok"`) {
 			t.Errorf("body = %q: expected status ok", rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), `"commit"`) || !strings.Contains(rr.Body.String(), `"build_date"`) {
+			t.Errorf("body = %q: expected commit and build_date fields", rr.Body.String())
 		}
 	})
 

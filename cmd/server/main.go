@@ -31,6 +31,16 @@ import (
 	"github.com/musicguessr/musicguessr-backend/internal/youtube"
 )
 
+// Set via -ldflags "-X main.gitCommit=... -X main.buildDate=..." at image
+// build time (see Dockerfile's GIT_COMMIT/BUILD_DATE build args and
+// docker-multiarch.yml, which passes github.sha and the current UTC date).
+// A local `go run`/`go build` with no ldflags leaves these at their zero
+// values, which is expected — only released container images set them.
+var (
+	gitCommit = "unknown"
+	buildDate = "unknown"
+)
+
 // metadataCacheAdapter implements metadata.Cache on top of the persistent,
 // two-tier rcache.Cache (Valkey + S3) — see internal/rcache. The per-call ttl
 // metadata.Cache.Set receives is intentionally ignored: rcache's own
@@ -477,7 +487,11 @@ func main() {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status":     "ok",
+			"commit":     gitCommit,
+			"build_date": buildDate,
+		})
 	})
 
 	// A no-cost stand-in for a real error-tracking service (Sentry etc.):

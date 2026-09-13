@@ -6,7 +6,14 @@ WORKDIR /src
 COPY go.mod .
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -trimpath -o /backend ./cmd/server
+# Passed via --build-arg from docker-multiarch.yml (github.sha and the
+# current UTC date) — surfaced at runtime on /health. Left at their Go
+# zero-value defaults ("unknown", see main.go) for a plain local build.
+ARG GIT_COMMIT=unknown
+ARG BUILD_DATE=unknown
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -ldflags="-s -w -X main.gitCommit=${GIT_COMMIT} -X main.buildDate=${BUILD_DATE}" \
+    -trimpath -o /backend ./cmd/server
 
 # The final image below has no shell, so `RUN mkdir` can't run there —
 # pre-create the deck data dir here (this stage still has a shell) with the
