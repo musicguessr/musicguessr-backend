@@ -310,6 +310,52 @@ func handleClientError(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// cspReport is the legacy report-uri body: {"csp-report": {...}}. Only the
+// fields needed to tell a real policy gap (a provider SDK loading from a new
+// host) apart from browser-extension noise are kept.
+type cspReport struct {
+	Report struct {
+		DocumentURI        string `json:"document-uri"`
+		BlockedURI         string `json:"blocked-uri"`
+		EffectiveDirective string `json:"effective-directive"`
+		ViolatedDirective  string `json:"violated-directive"`
+		SourceFile         string `json:"source-file"`
+		LineNumber         int    `json:"line-number"`
+		Disposition        string `json:"disposition"`
+	} `json:"csp-report"`
+}
+
+// handleCSPReport logs Content-Security-Policy violations reported by
+// browsers (the frontend's nginx sends report-uri pointing here). Same
+// fire-and-forget contract as handleClientError: always 204.
+func handleCSPReport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 8<<10) // 8 KB
+
+	var rep cspReport
+	if err := json.NewDecoder(r.Body).Decode(&rep); err == nil && rep.Report.BlockedURI+rep.Report.ViolatedDirective != "" {
+		directive := rep.Report.EffectiveDirective
+		if directive == "" {
+			directive = rep.Report.ViolatedDirective
+		}
+		slog.Warn("csp violation",
+			"directive", truncateField(directive),
+			"blocked_uri", truncateField(stripQuery(rep.Report.BlockedURI)),
+			"document_uri", truncateField(stripQuery(rep.Report.DocumentURI)),
+			"source_file", truncateField(stripQuery(rep.Report.SourceFile)),
+			"line", rep.Report.LineNumber,
+			"disposition", truncateField(rep.Report.Disposition),
+			"user_agent", truncateField(r.UserAgent()),
+			"ip", clientIP(r),
+			"request_id", requestid.FromContext(r.Context()),
+		)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // stripQuery drops a reported page URL's query and fragment before logging —
 // an error reported from /callback would otherwise ship the Spotify OAuth
 // ?code= to the log aggregator.
@@ -512,6 +558,10 @@ func main() {
 	// gives it somewhere to report them to. Logged only, no storage/alerting
 	// beyond that — deliberately minimal.
 	mux.HandleFunc("/api/client-error", rateLimited(clientErrorLimiter, handleClientError))
+	// CSP violation reports from the frontend's Content-Security-Policy
+	// (report-uri). A policy gap shows up here as "csp violation" in the logs
+	// instead of as a silently broken player for some users.
+	mux.HandleFunc("/api/csp-report", rateLimited(clientErrorLimiter, handleCSPReport))
 
 	mux.HandleFunc("/api/resolve", rateLimited(resolveLimiter, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {

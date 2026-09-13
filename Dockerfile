@@ -28,7 +28,8 @@ RUN mkdir -p /data/decks && chown 65532:65532 /data/decks
 # variant keeps a shell/pip for install-time use only; the final stage below
 # has neither.
 FROM registry.access.redhat.com/hi/python:3.13-builder AS ytdlp-build
-RUN pip install --no-cache-dir --target=/tmp/ytdlp-deps yt-dlp
+COPY requirements-ytdlp.txt /tmp/requirements-ytdlp.txt
+RUN pip install --no-cache-dir --require-hashes --target=/tmp/ytdlp-deps -r /tmp/requirements-ytdlp.txt
 
 # hi/python: same nonroot/no-package-manager hardening as hi/static, plus a
 # Python 3.13 interpreter — needed here only to run yt-dlp as a module via

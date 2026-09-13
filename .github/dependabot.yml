@@ -1,0 +1,24 @@
+version: 2
+updates:
+  # Actions are pinned to commit SHAs; Dependabot bumps the SHA and the
+  # trailing "# vX.Y.Z" comment together.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
+
+  # yt-dlp is pinned (with its hash) in requirements-ytdlp.txt. It has to
+  # track YouTube-side changes closely — a stale release is the usual reason
+  # searches start failing — so it's checked daily, not weekly.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: daily
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
