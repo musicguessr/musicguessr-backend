@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
@@ -38,16 +37,16 @@ func CleanupExpired(ctx context.Context, store deckstore.Store) (deleted int, er
 	now := time.Now().UTC()
 
 	for _, id := range ids {
-		if strings.Contains(id, "/") {
-			// Not a deck — deck storage and internal/rcache's resolve cache
-			// share the same S3 bucket (tan-nakamura), and rcache namespaces
-			// its keys as "<namespace>/<hash>" (e.g. "youtube/<hash>") to get
-			// its own S3 "folder". Deck IDs are always flat (nanoid-style, no
-			// "/"), so this is the cheap way to tell the two apart without a
-			// deckstore-level prefix filter that both callers would need to
-			// pass through. Skipping here (not attempting Get+unmarshal)
-			// avoids a wasted S3 GET per cache entry and the resulting
-			// "skipping corrupted deck" warning spam every sweep.
+		if !deckIDRe.MatchString(id) {
+			// Not a deck. Deck storage shares its S3 bucket with
+			// internal/rcache, whose keys are "<namespace>/<hash>" today but
+			// were flat "<namespace>-<hash>" before a2e0780 — and those legacy
+			// objects were never migrated. Only checking for "/" let them
+			// through: a JSON-string value logged "skipping corrupted deck"
+			// every sweep, and a JSON-object value unmarshalled into a Deck
+			// with a zero ExpiresAt and was deleted as "expired" — silently
+			// wiping the permanent cache tier. Real deck IDs always match
+			// deckIDRe, the same check GetDeck enforces.
 			continue
 		}
 		sem <- struct{}{}
@@ -70,6 +69,13 @@ func CleanupExpired(ctx context.Context, store deckstore.Store) (deleted int, er
 			var d Deck
 			if err := json.Unmarshal(data, &d); err != nil {
 				slog.Warn("deck cleanup: skipping corrupted deck", "id", id, "err", err)
+				return
+			}
+			// A deck always has an ID matching its key and a non-zero expiry;
+			// anything else is a foreign object that happens to parse, and
+			// deleting it on a guess is how this sweep destroyed cache data.
+			if d.ID != id || d.ExpiresAt.IsZero() {
+				slog.Warn("deck cleanup: skipping non-deck object", "id", id)
 				return
 			}
 			if now.Before(d.ExpiresAt) {

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -298,7 +299,7 @@ func handleClientError(w http.ResponseWriter, r *http.Request) {
 			"context", truncateField(req.Context),
 			"message", truncateField(req.Message),
 			"stack", truncateField(req.Stack),
-			"url", truncateField(req.URL),
+			"url", truncateField(stripQuery(req.URL)),
 			"user_agent", truncateField(req.UserAgent),
 			"ip", clientIP(r),
 			"resolve_request_id", truncateField(req.RequestID),
@@ -307,6 +308,16 @@ func handleClientError(w http.ResponseWriter, r *http.Request) {
 		)
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// stripQuery drops a reported page URL's query and fragment before logging —
+// an error reported from /callback would otherwise ship the Spotify OAuth
+// ?code= to the log aggregator.
+func stripQuery(u string) string {
+	if i := strings.IndexAny(u, "?#"); i >= 0 {
+		return u[:i]
+	}
+	return u
 }
 
 // rateLimited wraps a handler with a per-IP token-bucket check. Applied
@@ -719,7 +730,7 @@ func fetchSpotifyMeta(ctx context.Context, client *http.Client, trackID string) 
 	}
 	spotifyCacheMu.RUnlock()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://open.spotify.com/track/"+trackID, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://open.spotify.com/track/"+url.PathEscape(trackID), nil)
 	if err != nil {
 		slog.Error("spotify request creation failed", "trackID", trackID, "err", err)
 		return "", ""

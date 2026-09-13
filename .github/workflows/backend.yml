@@ -6,13 +6,19 @@ on:
       - '**/*.go'
       - 'go.mod'
       - '.golangci.yml'
+      - 'Dockerfile'
       - '.github/workflows/backend.yml'
+      - '.github/workflows/docker-multiarch.yml'
   pull_request:
     paths:
       - '**/*.go'
       - 'go.mod'
       - '.golangci.yml'
+      - 'Dockerfile'
       - '.github/workflows/backend.yml'
+
+permissions:
+  contents: read
 
 jobs:
   lint:

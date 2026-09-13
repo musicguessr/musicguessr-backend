@@ -1,8 +1,13 @@
 name: Build and Push multi-arch Docker image
 
+# Runs only after Backend CI succeeds for a push to main — the Pi's Quadlets
+# auto-update from :latest, so publishing in parallel with (instead of after)
+# the tests used to ship images whose tests had failed.
 on:
-  push:
-    branches: [ main, master ]
+  workflow_run:
+    workflows: [Backend CI]
+    types: [completed]
+    branches: [main, master]
   workflow_dispatch:
 
 permissions:
@@ -11,10 +16,17 @@ permissions:
 
 jobs:
   build:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
     runs-on: ubuntu-latest
+    env:
+      COMMIT_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          ref: ${{ env.COMMIT_SHA }}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
@@ -44,9 +56,9 @@ jobs:
           push: true
           tags: |
             ghcr.io/${{ github.repository_owner }}/musicguessr-backend:latest
-            ghcr.io/${{ github.repository_owner }}/musicguessr-backend:${{ github.sha }}
+            ghcr.io/${{ github.repository_owner }}/musicguessr-backend:${{ env.COMMIT_SHA }}
           build-args: |
-            GIT_COMMIT=${{ github.sha }}
+            GIT_COMMIT=${{ env.COMMIT_SHA }}
             BUILD_DATE=${{ steps.build_date.outputs.date }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

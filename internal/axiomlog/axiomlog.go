@@ -19,6 +19,10 @@ const (
 	maxBatchEvents = 100
 	flushInterval  = 3 * time.Second
 	requestTimeout = 10 * time.Second
+	// While Axiom is down or slow, lines keep arriving; past this size new
+	// lines are dropped from the Axiom copy (stderr still has them) rather
+	// than growing memory without bound on a Pi.
+	maxBufferBytes = 4 << 20
 )
 
 // Writer batches raw NDJSON log lines (exactly what slog.NewJSONHandler
@@ -38,6 +42,10 @@ type Writer struct {
 	batch bytes.Buffer
 	count int
 
+	// kick asks flushLoop to flush early once a batch is full. Write must
+	// never do the HTTP call itself: slog's handler holds its lock while
+	// writing, so a slow Axiom would stall every goroutine that logs.
+	kick chan struct{}
 	stop chan struct{}
 }
 
@@ -53,6 +61,7 @@ func New() *Writer {
 		token:  token,
 		orgID:  os.Getenv("AXIOM_ORG_ID"),
 		client: &http.Client{Timeout: requestTimeout},
+		kick:   make(chan struct{}, 1),
 		stop:   make(chan struct{}),
 	}
 	go w.flushLoop()
@@ -65,12 +74,17 @@ func New() *Writer {
 // io.MultiWriter) would otherwise treat a short write as an error too.
 func (w *Writer) Write(p []byte) (int, error) {
 	w.mu.Lock()
-	w.batch.Write(p)
-	w.count++
+	if w.batch.Len()+len(p) <= maxBufferBytes {
+		w.batch.Write(p)
+		w.count++
+	}
 	full := w.count >= maxBatchEvents
 	w.mu.Unlock()
 	if full {
-		w.flush()
+		select {
+		case w.kick <- struct{}{}:
+		default:
+		}
 	}
 	return len(p), nil
 }
@@ -89,6 +103,8 @@ func (w *Writer) flushLoop() {
 	for {
 		select {
 		case <-ticker.C:
+			w.flush()
+		case <-w.kick:
 			w.flush()
 		case <-w.stop:
 			return

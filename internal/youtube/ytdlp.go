@@ -63,9 +63,22 @@ type ytDlpEntry struct {
 	Uploader string `json:"uploader"`
 }
 
+// ytDlpSlots caps concurrent yt-dlp processes process-wide. Each one is a
+// full Python interpreter (~50-100 MB); per-IP rate limits don't bound the
+// total, so a burst of cold lookups from many clients (plus cachewarm) could
+// otherwise run the Pi out of memory.
+var ytDlpSlots = make(chan struct{}, 3)
+
 func runYtDlp(ctx context.Context, timeout time.Duration, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+
+	select {
+	case ytDlpSlots <- struct{}{}:
+		defer func() { <-ytDlpSlots }()
+	case <-ctx.Done():
+		return nil, fmt.Errorf("yt-dlp: no free slot: %w", ctx.Err())
+	}
 
 	fullArgs := append([]string{"-m", "yt_dlp", "--no-warnings", "--ignore-config", "--skip-download", "--dump-json"}, args...)
 	cmd := exec.CommandContext(ctx, ytPythonBin, fullArgs...)

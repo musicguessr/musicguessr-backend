@@ -1,6 +1,7 @@
 package axiomlog
 
 import (
+	"bytes"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -108,15 +109,58 @@ func TestWrite_AutoFlushesAtBatchLimit(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	w := &Writer{client: srv.Client(), url: srv.URL, token: "t"}
+	w := &Writer{client: srv.Client(), url: srv.URL, token: "t", kick: make(chan struct{}, 1), stop: make(chan struct{})}
+	go w.flushLoop()
+	t.Cleanup(w.Close)
 	for i := 0; i < maxBatchEvents; i++ {
 		_, _ = w.Write([]byte(`{"i":1}` + "\n"))
 	}
 
-	// The auto-flush triggered by hitting maxBatchEvents happens inline in
-	// Write, so no need to wait for the background ticker here.
-	if atomic.LoadInt32(&calls) != 1 {
-		t.Fatalf("got %d requests, want 1 triggered by hitting the batch size limit", calls)
+	// Well under flushInterval, so a request here came from the batch-full
+	// kick rather than the periodic ticker.
+	deadline := time.Now().Add(flushInterval / 2)
+	for time.Now().Before(deadline) {
+		if atomic.LoadInt32(&calls) == 1 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("got %d requests, want 1 triggered by hitting the batch size limit", atomic.LoadInt32(&calls))
+}
+
+func TestWrite_DoesNotBlockOnSlowIngest(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(func() { close(release); srv.Close() })
+
+	w := &Writer{client: srv.Client(), url: srv.URL, token: "t", kick: make(chan struct{}, 1), stop: make(chan struct{})}
+	go w.flushLoop()
+
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < maxBatchEvents*3; i++ {
+			_, _ = w.Write([]byte(`{"i":1}` + "\n"))
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Write blocked while the ingest endpoint was hanging")
+	}
+}
+
+func TestWrite_DropsLinesPastBufferCap(t *testing.T) {
+	w := &Writer{}
+	line := bytes.Repeat([]byte("x"), 1<<20)
+	for i := 0; i < 10; i++ {
+		_, _ = w.Write(line)
+	}
+	if w.batch.Len() > maxBufferBytes {
+		t.Fatalf("buffer grew to %d bytes, cap is %d", w.batch.Len(), maxBufferBytes)
 	}
 }
 

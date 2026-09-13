@@ -243,7 +243,11 @@ collect:
 		ArtworkURL:    artworkFinal,
 	}
 
-	if cache != nil {
+	// Only cache a real majority vote. When ctx expires mid-collection
+	// (e.g. deck enrichment's short deadline) a single provider's answer
+	// can land here, and the S3 cache tier never expires — one provider's
+	// wrong year would then stick for every future resolve of this track.
+	if cache != nil && len(results) >= quorum {
 		cache.Set(key, out, cacheTTL)
 	}
 
@@ -341,9 +345,13 @@ func chooseArtworkPreferred(urls []string) string {
 	return urls[0]
 }
 
+// luceneQuoted escapes a value for use inside a "quoted" Lucene phrase — an
+// unescaped `"` in a title (e.g. a nickname) otherwise breaks the query.
+var luceneQuoted = strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+
 // musicBrainzSearch queries the MusicBrainz recordings endpoint for a match.
 func musicBrainzSearch(ctx context.Context, artist, title string) (*itunes.Track, error) {
-	q := fmt.Sprintf(`recording:"%s" AND artist:"%s"`, title, artist)
+	q := fmt.Sprintf(`recording:"%s" AND artist:"%s"`, luceneQuoted.Replace(title), luceneQuoted.Replace(artist))
 	reqURL := "https://musicbrainz.org/ws/2/recording?fmt=json&limit=3&query=" + url.QueryEscape(q)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {

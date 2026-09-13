@@ -74,6 +74,32 @@ func TestCleanupExpired_SkipsNamespacedCacheKeys(t *testing.T) {
 	}
 }
 
+func TestCleanupExpired_NeverDeletesForeignObjects(t *testing.T) {
+	store := newMockStore()
+	ctx := context.Background()
+	// Legacy flat rcache keys from before the "/" namespace separator.
+	_ = store.Put(ctx, "metadata-3f2a9c", []byte(`{"artist":"Mabel","title":"Don't Call Me Up","year":2019}`))
+	_ = store.Put(ctx, "youtube-9b1e44", []byte(`"bkCoJA4CgRY"`))
+	// Valid-looking ID whose JSON parses but isn't a deck.
+	_ = store.Put(ctx, "abc123", []byte(`{"artist":"Mabel"}`))
+	// Deck JSON stored under a different key than its own ID.
+	data, _ := json.Marshal(Deck{ID: "other", ExpiresAt: time.Now().Add(-time.Hour)})
+	_ = store.Put(ctx, "mismatch", data)
+
+	deleted, err := CleanupExpired(ctx, store)
+	if err != nil {
+		t.Fatalf("CleanupExpired: %v", err)
+	}
+	if deleted != 0 {
+		t.Fatalf("got %d deleted, want 0", deleted)
+	}
+	for _, key := range []string{"metadata-3f2a9c", "youtube-9b1e44", "abc123", "mismatch"} {
+		if _, ok := store.data[key]; !ok {
+			t.Errorf("%q should not have been deleted", key)
+		}
+	}
+}
+
 func TestCleanupExpired_EmptyStore(t *testing.T) {
 	store := newMockStore()
 	deleted, err := CleanupExpired(context.Background(), store)
