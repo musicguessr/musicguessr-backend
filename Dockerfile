@@ -27,14 +27,14 @@ RUN mkdir -p /data/decks && chown 65532:65532 /data/decks
 # this previously relied on are no longer reliably available. The "-builder"
 # variant keeps a shell/pip for install-time use only; the final stage below
 # has neither.
-FROM registry.access.redhat.com/hi/python:3.13-builder AS ytdlp-build
+FROM registry.access.redhat.com/hi/python:3.14-builder AS ytdlp-build
 COPY requirements-ytdlp.txt /tmp/requirements-ytdlp.txt
 RUN pip install --no-cache-dir --require-hashes --target=/tmp/ytdlp-deps -r /tmp/requirements-ytdlp.txt
 
 # hi/python: same nonroot/no-package-manager hardening as hi/static, plus a
 # Python 3.13 interpreter — needed here only to run yt-dlp as a module via
 # PYTHONPATH (no console-script wrapper is installed with --target).
-FROM registry.access.redhat.com/hi/python:3.13
+FROM registry.access.redhat.com/hi/python:3.14
 COPY --from=build --chown=65532:65532 --chmod=0755 /backend /backend
 COPY --from=build --chown=65532:65532 /data/decks /data/decks
 COPY --from=ytdlp-build --chown=65532:65532 /tmp/ytdlp-deps /opt/ytdlp-deps
