@@ -32,7 +32,7 @@ COPY requirements-ytdlp.txt /tmp/requirements-ytdlp.txt
 RUN pip install --no-cache-dir --require-hashes --target=/tmp/ytdlp-deps -r /tmp/requirements-ytdlp.txt
 
 # hi/python: same nonroot/no-package-manager hardening as hi/static, plus a
-# Python 3.13 interpreter — needed here only to run yt-dlp as a module via
+# Python 3 interpreter — needed here only to run yt-dlp as a module via
 # PYTHONPATH (no console-script wrapper is installed with --target).
 FROM registry.access.redhat.com/hi/python:3.14
 COPY --from=build --chown=65532:65532 --chmod=0755 /backend /backend

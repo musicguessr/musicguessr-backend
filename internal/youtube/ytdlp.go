@@ -30,8 +30,10 @@ const (
 // ytPythonBin is the interpreter used to run the yt-dlp module. The
 // production image has no console-script wrapper on PATH — yt-dlp is
 // installed with `pip install --target=` and located via PYTHONPATH — so it
-// must be invoked as `python3.13 -m yt_dlp`.
-const ytPythonBin = "python3.13"
+// must be invoked as `python3 -m yt_dlp`. Deliberately not a versioned name
+// like python3.13: the base image's Python minor is bumped by Dependabot, and
+// a pinned name here silently broke every YouTube lookup when it was.
+const ytPythonBin = "python3"
 
 // notFoundMarkers are substrings yt-dlp prints to stderr for a confirmed
 // negative (video/playlist doesn't exist, is private, or was taken down),

@@ -54,11 +54,27 @@ jobs:
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
+          # Only the commit tag here; :latest is moved in the next step.
           tags: |
-            ghcr.io/${{ github.repository_owner }}/musicguessr-backend:latest
             ghcr.io/${{ github.repository_owner }}/musicguessr-backend:${{ env.COMMIT_SHA }}
           build-args: |
             GIT_COMMIT=${{ env.COMMIT_SHA }}
             BUILD_DATE=${{ steps.build_date.outputs.date }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Two merges in quick succession start two builds, and the older one can
+      # finish last — it used to overwrite :latest with the older image (the
+      # Pi auto-updates from :latest). :latest now only moves if this commit
+      # is still the tip of the branch; otherwise the newer run owns it.
+      - name: Tag as latest if still the branch tip
+        env:
+          BRANCH: ${{ github.event.workflow_run.head_branch || github.ref_name }}
+          IMAGE: ghcr.io/${{ github.repository_owner }}/musicguessr-backend
+        run: |
+          tip=$(git ls-remote origin "refs/heads/$BRANCH" | cut -f1)
+          if [ "$tip" != "$COMMIT_SHA" ]; then
+            echo "Skipping :latest — $BRANCH has moved on to $tip"
+            exit 0
+          fi
+          docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE:$COMMIT_SHA"
