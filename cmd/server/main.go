@@ -8,11 +8,13 @@ import (
 	"html"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -266,6 +268,68 @@ type clientErrorRequest struct {
 	// ties this report back to that request's own "resolve request" log
 	// line — see internal/requestid.
 	RequestID string `json:"request_id,omitempty"`
+	// Level "info" marks a diagnostic event rather than a failure (e.g. a
+	// successful scan, sent so failure rates can be computed against it); it
+	// is logged as "client event" at INFO instead of "client error report" at
+	// WARN. Anything else is treated as an error report.
+	Level string `json:"level,omitempty"`
+	// Details are flat, client-measured diagnostics (scanner frame rate,
+	// resolution, which detector ran, ...). Logged as a nested "details"
+	// object, which Axiom exposes as queryable fields such as
+	// ['details.fps']. See sanitizeDetails for what is kept.
+	Details map[string]any `json:"details,omitempty"`
+}
+
+const (
+	maxDetailKeys     = 40
+	maxDetailKeyLen   = 40
+	maxDetailValueLen = 160
+)
+
+// sanitizeDetails turns the client-supplied details map into log attributes,
+// keeping only what is safe and useful to index: short snake_case keys and
+// string, finite-number or bool values. Nested objects, arrays, nulls,
+// over-long strings and keys beyond the cap are dropped, so a client can't use
+// the endpoint to inject arbitrary structure or flood a log line. Sorted for a
+// stable field order.
+func sanitizeDetails(in map[string]any) []any {
+	keys := make([]string, 0, len(in))
+	for k := range in {
+		if k == "" || len(k) > maxDetailKeyLen {
+			continue
+		}
+		valid := true
+		for _, c := range k {
+			if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_') {
+				valid = false
+				break
+			}
+		}
+		if valid {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	if len(keys) > maxDetailKeys {
+		keys = keys[:maxDetailKeys]
+	}
+	attrs := make([]any, 0, len(keys))
+	for _, k := range keys {
+		switch v := in[k].(type) {
+		case string:
+			if len(v) > maxDetailValueLen {
+				v = v[:maxDetailValueLen] + "…"
+			}
+			attrs = append(attrs, slog.String(k, v))
+		case float64:
+			if !math.IsNaN(v) && !math.IsInf(v, 0) {
+				attrs = append(attrs, slog.Float64(k, v))
+			}
+		case bool:
+			attrs = append(attrs, slog.Bool(k, v))
+		}
+	}
+	return attrs
 }
 
 // clientErrorFieldLimit caps each field's logged length — the request body
@@ -295,7 +359,12 @@ func handleClientError(w http.ResponseWriter, r *http.Request) {
 
 	var req clientErrorRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err == nil && req.Message != "" {
-		slog.Warn("client error report",
+		msg, level := "client error report", slog.LevelWarn
+		if req.Level == "info" {
+			msg, level = "client event", slog.LevelInfo
+		}
+		slog.Log(r.Context(), level, msg,
+			slog.Group("details", sanitizeDetails(req.Details)...),
 			"context", truncateField(req.Context),
 			"message", truncateField(req.Message),
 			"stack", truncateField(req.Stack),
@@ -508,7 +577,7 @@ func main() {
 	// Client-error reports are small and infrequent by nature (a handful per
 	// real session at most) — this exists to catch someone trying to use the
 	// endpoint as a free-form log-spam sink, not to throttle real usage.
-	clientErrorLimiter := ratelimit.New(0.2, 5, 10*time.Minute) // ~12/min sustained, burst 5
+	clientErrorLimiter := ratelimit.New(0.5, 10, 10*time.Minute) // ~30/min sustained, burst 10
 	// Deck reads are cheap per call but still a billed S3 GET each, including
 	// for ids that don't exist — without a limit this is the only public
 	// endpoint doing external I/O that someone can hammer for free. Generous
