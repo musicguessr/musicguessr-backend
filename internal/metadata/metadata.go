@@ -70,7 +70,51 @@ func getCache() Cache {
 
 // Resolve tries providers in parallel and returns the first complete result.
 // Caller should provide a context (e.g. request context).
+//
+// Spotify titles often carry version or feature suffixes ("En apesanteur -
+// Single Version", "Feux (feat. Jul)") that the providers' search endpoints
+// treat as required words, so the whole title matches nothing: iTunes returns
+// 0 results for the raw title but the right track for the bare one. When every
+// provider comes back empty and the title has such a suffix, it is searched
+// once more without it.
 func Resolve(ctx context.Context, artist, title string) (*itunes.Track, error) {
+	t, err := resolve(ctx, artist, title)
+	if err == nil || ctx.Err() != nil {
+		return t, err
+	}
+	bare := searchTitle(title)
+	if bare == "" || bare == title {
+		return nil, err
+	}
+	t2, err2 := resolve(ctx, artist, bare)
+	if err2 != nil {
+		return nil, err
+	}
+	slog.Info("metadata found with bare title", "artist", artist, "title", title, "bare_title", bare)
+	// The retry cached its own (bare-title) key when it reached quorum; point
+	// the original key at the same result so the next scan of this card is a
+	// cache hit instead of another full round of empty searches first.
+	if cache := getCache(); cache != nil {
+		if _, ok := cache.Get(normalizeKey(artist) + "|" + normalizeKey(bare)); ok {
+			cache.Set(normalizeKey(artist)+"|"+normalizeKey(title), t2, cacheTTL)
+		}
+	}
+	return t2, nil
+}
+
+// searchTitle strips a trailing "(...)", "[...]" or " - ..." part from a track
+// title. Returns the title unchanged when there is none.
+func searchTitle(title string) string {
+	for _, sep := range []string{" (", " [", " - "} {
+		if i := strings.Index(title, sep); i > 0 {
+			title = title[:i]
+		}
+	}
+	return strings.TrimSpace(title)
+}
+
+// resolve is one provider round for exactly the given artist and title.
+func resolve(ctx context.Context, artist, title string) (*itunes.Track, error) {
 	// overall timeout
 	ctx, cancel := context.WithTimeout(ctx, 6*time.Second)
 	defer cancel()

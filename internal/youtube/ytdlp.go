@@ -49,6 +49,9 @@ var notFoundMarkers = []string{
 	"does not exist",
 	"this playlist does not exist",
 	"unable to find playlist",
+	// Private/auto-generated lists (Liked videos, Mixes) that YouTube won't
+	// show to a logged-out client — a definitive answer, not a transient error.
+	"playlist type is unviewable",
 }
 
 type ytSearchItem struct {

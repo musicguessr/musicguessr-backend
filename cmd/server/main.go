@@ -573,6 +573,7 @@ func main() {
 			writeJSON(w, http.StatusBadRequest, errResponse{"missing url parameter"})
 			return
 		}
+		start := time.Now()
 		reqID := requestid.FromContext(r.Context())
 		// Client-generated, in-memory-only for the lifetime of one browser
 		// tab (see SessionIdService on the frontend) — lets logs correlate
@@ -670,7 +671,7 @@ func main() {
 					resp.Links["apple_music"] = track.AppleMusicURL
 				}
 			} else {
-				slog.Warn("metadata resolve failed", "artist", artist, "title", title, "err", err)
+				slog.Warn("metadata resolve failed", "artist", artist, "title", title, "err", err, "request_id", reqID)
 				resp.Artist = artist
 				resp.Title = title
 				resp.Links = resolver.StreamingLinks(artist, title)
@@ -716,7 +717,11 @@ func main() {
 		// alongside a bug gets a maintainer straight to exactly what this
 		// request resolved to (nearby WARN lines above, if any, then explain
 		// why), rather than having to correlate by approximate timestamp.
-		slog.Info("resolve request", "request_id", reqID, "session_id", sessionID, "spotify_id", spotifyID, "artist", resp.Artist, "title", resp.Title, "year", resp.Year)
+		// duration_ms is the whole handler (Spotify lookup, metadata fan-out and
+		// yt-dlp run concurrently, so it tracks the slowest of them); youtube
+		// says whether the card will actually play on the YouTube provider.
+		slog.Info("resolve request", "request_id", reqID, "session_id", sessionID, "spotify_id", spotifyID, "artist", resp.Artist, "title", resp.Title, "year", resp.Year,
+			"duration_ms", time.Since(start).Milliseconds(), "youtube", resp.YouTubeVideoID != "")
 
 		writeJSON(w, http.StatusOK, resp)
 	}))

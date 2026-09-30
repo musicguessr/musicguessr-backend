@@ -207,3 +207,80 @@ func TestScoreMatch_TitleCoverage(t *testing.T) {
 		t.Errorf("expected score < 7 for unrelated video, got %d", zero)
 	}
 }
+
+// Real lookups that failed in production ("no confident match found") even
+// though the right upload was in yt-dlp's results: each is the exact Spotify
+// title and the video title YouTube returned.
+func TestScoreMatch_TitleVariationsSeenInProduction(t *testing.T) {
+	tests := []struct {
+		name         string
+		video        string
+		artist       string
+		title        string
+		wantMatch    bool
+		wantStrictly bool // must also pass the strict (original-only) pass
+	}{
+		{"dotted acronym", "Justice - D.A.N.C.E. (Official Video)", "Justice", "D.A.N.C.E.", true, true},
+		{"dotted acronym, no trailing dot", "Justice - D.A.N.C.E", "Justice", "D.A.N.C.E.", true, true},
+		{"elision written differently", "Yves Montand - Moi j'm'en fous", "Yves Montand", "Moi, je m'en fous", true, true},
+		{"elision, same spelling", "Yves Montand - Moi, je m'en fous", "Yves Montand", "Moi, je m'en fous", true, true},
+		{"curly vs straight apostrophe", "Lara Fabian - Je t'aime", "Lara Fabian", "Je T’aime", true, true},
+		{"straight vs curly apostrophe", "Lara Fabian - Je t’aime", "Lara Fabian", "Je T'aime", true, true},
+		{"live upload still rejected", "Lara Fabian - Je t'aime - Live in Paris, 2001", "Lara Fabian", "Je T’aime", true, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			strict := scoreMatch(tc.video, tc.artist, tc.title, false)
+			relaxed := scoreMatch(tc.video, tc.artist, tc.title, true)
+			if tc.wantStrictly && strict < 7 {
+				t.Errorf("strict score = %d, want >= 7", strict)
+			}
+			if !tc.wantStrictly && strict != 0 {
+				t.Errorf("strict score = %d, want 0 (variant must stay disqualified)", strict)
+			}
+			if tc.wantMatch && relaxed < 7 {
+				t.Errorf("relaxed score = %d, want >= 7", relaxed)
+			}
+		})
+	}
+}
+
+// The folding must not turn unrelated titles into matches.
+func TestScoreMatch_FoldingDoesNotCreateFalseMatches(t *testing.T) {
+	tests := []struct{ video, artist, title string }{
+		{"Justice - Fire (Official Video)", "Justice", "D.A.N.C.E."},
+		{"Yves Montand - Les feuilles mortes", "Yves Montand", "Moi, je m'en fous"},
+		{"Lara Fabian - Adagio", "Lara Fabian", "Je T’aime"},
+	}
+	for _, tc := range tests {
+		if got := scoreMatch(tc.video, tc.artist, tc.title, true); got >= 7 {
+			t.Errorf("scoreMatch(%q, %q, %q) = %d, want < 7", tc.video, tc.artist, tc.title, got)
+		}
+	}
+}
+
+func TestNormalizeForMatch(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"D.A.N.C.E.", "dance"},
+		{"R.E.M.", "rem"},
+		{"Je T’aime", "je aime"},
+		{"Moi j'm'en fous", "moi jen fous"},
+		{"L'Impératrice", "imperatrice"},
+		{"I'm Good", "im good"},     // not an elision: unchanged from normalize()
+		{"Don’t Stop", "dont stop"}, // curly quote folded, contraction kept
+		{"feat. Jul", "feat jul"},   // a dot after a word is not an acronym
+	}
+	for _, tc := range tests {
+		if got := normalizeForMatch(tc.in); got != tc.want {
+			t.Errorf("normalizeForMatch(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// Cache keys must keep using the plain normalize(), or every cached lookup
+// with an apostrophe or dotted acronym in its title would be orphaned.
+func TestSearchCacheKey_UnchangedByMatchFolding(t *testing.T) {
+	if got, want := searchCacheKey("Justice", "D.A.N.C.E.", true), "justice|d a n c e|1"; got != want {
+		t.Errorf("searchCacheKey = %q, want %q", got, want)
+	}
+}

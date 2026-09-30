@@ -162,3 +162,25 @@ func TestMemoryCache_TTLExpiry(t *testing.T) {
 		t.Error("expected cache miss after TTL expired, got hit")
 	}
 }
+
+func TestSearchTitle(t *testing.T) {
+	tests := []struct{ in, want string }{
+		// Real titles whose raw form returned no results from any provider.
+		{"En apesanteur - Single Version", "En apesanteur"},
+		{"Feux (feat. Jul)", "Feux"},
+		{"IMMER (MIT MAKKO)", "IMMER"},
+		{"Song [Remastered 2011]", "Song"},
+		{"Song - Remastered (2011 Mix)", "Song"},
+		// Nothing to strip.
+		{"Shackled Up", "Shackled Up"},
+		{"D.A.N.C.E.", "D.A.N.C.E."},
+		{"Mr. Brightside", "Mr. Brightside"},
+		// A separator at the very start is not a suffix.
+		{"(What's the Story) Morning Glory?", "(What's the Story) Morning Glory?"},
+	}
+	for _, tc := range tests {
+		if got := searchTitle(tc.in); got != tc.want {
+			t.Errorf("searchTitle(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

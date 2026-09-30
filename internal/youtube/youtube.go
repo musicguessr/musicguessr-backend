@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"sync"
 )
@@ -196,10 +197,10 @@ func coreTitle(s string) string {
 }
 
 func scoreMatch(videoTitle, artist, title string, relaxed bool) int {
-	normVid := normalize(videoTitle)
-	normTitle := normalize(title)
-	normArtist := normalize(artist)
-	normCore := normalize(coreTitle(title))
+	normVid := normalizeForMatch(videoTitle)
+	normTitle := normalizeForMatch(title)
+	normArtist := normalizeForMatch(artist)
+	normCore := normalizeForMatch(coreTitle(title))
 
 	if !relaxed {
 		// Disqualify non-original versions unless the original title/artist itself contains the marker
@@ -316,6 +317,36 @@ func normalize(s string) string {
 	s = diacritics.Replace(s)
 	s = punct.Replace(s)
 	return strings.Join(strings.Fields(s), " ")
+}
+
+var (
+	// Curly and look-alike apostrophes Spotify and YouTube titles mix freely:
+	// "Je T’aime" (Spotify) vs "Je t'aime" (video) used to never match.
+	apostrophes = strings.NewReplacer("’", "'", "ʼ", "'", "‘", "'", "`", "'", "´", "'")
+	// "D.A.N.C.E." — single letters separated by dots. normalize() turns each
+	// dot into a space, leaving one-letter "words" that meaningfulWords drops,
+	// so the title had nothing left to match at all.
+	dottedAcronym = regexp.MustCompile(`\b[a-z](?:\.[a-z])+\b\.?`)
+	// French/Italian/Dutch elision before a vowel ("m'en", "l'amour", "t'aime").
+	// Videos write these inconsistently ("Moi, je m'en fous" vs "Moi j'm'en
+	// fous"), so the elided letter is dropped on both sides. Limited to d l j m
+	// n s t c before a vowel or h so English contractions ("I'm", "don't",
+	// "c'mon") keep matching exactly as before.
+	elision = regexp.MustCompile(`\b[dljmnstc]'([aeiouyh])`)
+)
+
+// normalizeForMatch is normalize() plus the title-variation folding above. It
+// is only for comparing a video title against a track: normalize() itself also
+// builds the persistent cache key (searchCacheKey), which must not change or
+// every cached lookup whose title has an apostrophe or a dotted acronym would
+// be orphaned.
+func normalizeForMatch(s string) string {
+	s = strings.ToLower(s)
+	s = diacritics.Replace(s)
+	s = apostrophes.Replace(s)
+	s = dottedAcronym.ReplaceAllStringFunc(s, func(m string) string { return strings.ReplaceAll(m, ".", "") })
+	s = elision.ReplaceAllString(s, "$1")
+	return normalize(s)
 }
 
 // normalizeForQuery prepares a string for use as an Invidious/YouTube search query.

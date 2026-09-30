@@ -45,6 +45,15 @@ func ImportPlaylistHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// YouTube Mixes (RD…) are generated per viewer and YouTube refuses to list
+	// them for anyone else: yt-dlp fails with "This playlist type is
+	// unviewable". Previously that surfaced as "try again shortly", which can
+	// never work, after burning a yt-dlp slot on it.
+	if isMixPlaylistID(playlistID) {
+		writeJSON(w, http.StatusUnprocessableEntity, errResp("youtube mix playlists can't be imported, use a regular playlist"))
+		return
+	}
+
 	videos, err := youtube.FetchPlaylist(r.Context(), playlistID, maxCards)
 	if err != nil {
 		if errors.Is(err, youtube.ErrNotFound) {
@@ -152,6 +161,11 @@ func extractPlaylistID(raw string) (string, error) {
 	}
 
 	return "", fmt.Errorf("could not extract playlist ID — paste a YouTube playlist URL or a bare playlist ID (starts with PL, UU, etc.)")
+}
+
+// isMixPlaylistID reports whether id is an auto-generated YouTube Mix/Radio.
+func isMixPlaylistID(id string) bool {
+	return strings.HasPrefix(id, "RD")
 }
 
 func looksLikePlaylistID(s string) bool {
