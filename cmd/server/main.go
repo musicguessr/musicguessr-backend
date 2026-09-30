@@ -300,7 +300,7 @@ func sanitizeDetails(in map[string]any) []any {
 		}
 		valid := true
 		for _, c := range k {
-			if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_') {
+			if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '_' {
 				valid = false
 				break
 			}
