@@ -2,6 +2,6 @@
 # rebuild can't silently pick up a different release; Dependabot (pip,
 # daily) proposes updates. Installed without extras, as before — none of its
 # optional dependencies are needed for search/metadata lookups.
-yt-dlp==2026.8.19 \
-    --hash=sha256:1d57897e94c6665a0a6f9bc54b34e584284e32c034ffab3a7df25d8f7b24eedf \
-    --hash=sha256:9e213e48cea35c66b378e4447903f118f6392a5fa380a2b6d7070ec86f4e0af1
+yt-dlp==2026.11.23 \
+    --hash=sha256:1db83772a8de7855a2dab551a94d7f617c88629dfdf506531c06b369b47f88a4 \
+    --hash=sha256:e9188e0c559905f7ee05acc1ba0b6fb3f310e7565bf6dea5f62b5300e0775e35
